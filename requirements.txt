@@ -1,0 +1,23 @@
+# Core
+numpy
+pandas
+yfinance
+matplotlib
+
+# Technical Analysis
+statsmodels
+scikit-learn
+stocktrends
+
+# Sentiment Analysis
+vaderSentiment
+textblob
+nltk
+beautifulsoup4
+requests
+
+# Data Sources (optional)
+alpha_vantage
+
+# Table formatting
+tabulate
