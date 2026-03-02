@@ -47,12 +47,12 @@ def scrape_article_data(url):
     return headline, date, content
 
 
-def main(num_pages=10, output_csv=None):
+def main(num_pages=3, output_csv=None):
     """
     Scrape crude oil news and run VADER sentiment analysis.
 
     Args:
-        num_pages: Number of listing pages to scrape (default 10).
+        num_pages: Number of listing pages to scrape (default 3).
         output_csv: Path to save results as CSV (optional).
     """
     base_url = "https://oilprice.com"
@@ -79,4 +79,4 @@ def main(num_pages=10, output_csv=None):
 
 
 if __name__ == '__main__':
-    main(num_pages=10, output_csv='data/crude_oil_news_articles.csv')
+    main(num_pages=3, output_csv='data/crude_oil_news_articles.csv')

@@ -1,5 +1,13 @@
 """Moving Average Convergence Divergence (MACD) indicator."""
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+
+import matplotlib.pyplot as plt
+from utils.data import fetch_ohlcv_data
+
 
 def calculate_macd(df, fast=12, slow=26, signal=9):
     """
@@ -29,8 +37,6 @@ def calculate_macd(df, fast=12, slow=26, signal=9):
 
 
 if __name__ == '__main__':
-    import matplotlib.pyplot as plt
-    from utils.data import fetch_ohlcv_data
 
     tickers = ['AAPL', 'MSFT', 'GOOG']
     data = fetch_ohlcv_data(tickers, period='1mo', interval='15m')

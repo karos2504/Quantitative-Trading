@@ -1,5 +1,9 @@
 """On-Balance Volume (OBV) indicator."""
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import numpy as np
 
 
@@ -16,7 +20,7 @@ def calculate_obv(df):
     df = df.copy()
     returns = df['Adj Close'].pct_change()
 
-    direction = np.where(returns >= 0, 1, -1)
+    direction = np.where(returns > 0, 1, np.where(returns < 0, -1, 0))
     direction[0] = 0
 
     vol_adj = df['Volume'] * direction

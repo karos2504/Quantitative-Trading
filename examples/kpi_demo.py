@@ -20,7 +20,7 @@ from utils.kpi import (
 )
 
 TICKERS = ['AAPL', 'MSFT', 'GOOG']
-PERIOD = '7mo'
+PERIOD = '1y'
 INTERVAL = '1d'
 PERIODS_PER_YEAR = 252
 RISK_FREE_RATE = 0.03

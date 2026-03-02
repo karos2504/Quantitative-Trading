@@ -68,6 +68,8 @@ def sharpe_ratio(returns, risk_free_rate, periods_per_year):
     """
     Annualized Sharpe ratio.
 
+    SR = mean(excess_return) / std(excess_return) * sqrt(N)
+
     Args:
         returns: pd.Series of periodic returns.
         risk_free_rate: Annual risk-free rate (e.g. 0.025 for 2.5%).
@@ -76,14 +78,21 @@ def sharpe_ratio(returns, risk_free_rate, periods_per_year):
     Returns:
         float: Sharpe ratio, or NaN if volatility is zero.
     """
-    cagr = cagr_from_returns(returns, periods_per_year)
-    vol = volatility(returns, periods_per_year)
-    return (cagr - risk_free_rate) / vol if vol != 0 else np.nan
+    rf_per_period = risk_free_rate / periods_per_year
+    excess = returns - rf_per_period
+    mean_excess = _to_scalar(excess.mean())
+    std_excess = _to_scalar(excess.std())
+    if std_excess == 0:
+        return np.nan
+    return (mean_excess / std_excess) * np.sqrt(periods_per_year)
 
 
 def sortino_ratio(returns, risk_free_rate, periods_per_year):
     """
     Annualized Sortino ratio (penalizes only downside volatility).
+
+    Sortino = annualized_mean_excess / annualized_downside_deviation
+    Downside deviation = sqrt(mean(min(excess, 0)^2)) * sqrt(N)
 
     Args:
         returns: pd.Series of periodic returns.
@@ -93,12 +102,15 @@ def sortino_ratio(returns, risk_free_rate, periods_per_year):
     Returns:
         float: Sortino ratio.
     """
-    cagr = cagr_from_returns(returns, periods_per_year)
-    downside = returns[returns < 0]
-    downside_std = _to_scalar(downside.std() * np.sqrt(periods_per_year))
-    if downside_std == 0:
+    rf_per_period = risk_free_rate / periods_per_year
+    excess = returns - rf_per_period
+    mean_excess = _to_scalar(excess.mean())
+    downside = excess.clip(upper=0)
+    downside_dev = _to_scalar(np.sqrt((downside ** 2).mean())) * np.sqrt(periods_per_year)
+    if downside_dev == 0:
         return np.nan
-    return (cagr - risk_free_rate) / downside_std
+    annualized_excess = mean_excess * periods_per_year
+    return annualized_excess / downside_dev
 
 
 def max_drawdown(returns):

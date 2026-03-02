@@ -1,5 +1,9 @@
 """Renko chart conversion utilities."""
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import numpy as np
 import pandas as pd
 from indicators.atr import calculate_atr
@@ -27,14 +31,14 @@ def convert_to_renko(df, atr_period=120):
     except (IndexError, KeyError):
         brick_size = 0.5
 
-    prices = df['Close'].to_numpy()
+    prices = df['Close'].to_numpy().ravel()
     dates = df.index.to_numpy()
 
     renko_dates, renko_closes, renko_uptrend = [], [], []
-    current_close = prices[0]
+    current_close = float(prices[0])
 
     for i in range(1, len(prices)):
-        change = prices[i] - current_close
+        change = float(prices[i]) - current_close
         if abs(change) >= brick_size:
             num_bricks = int(change / brick_size)
             trend = num_bricks > 0

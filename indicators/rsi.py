@@ -1,12 +1,16 @@
 """Relative Strength Index (RSI) indicator."""
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import numpy as np
 import pandas as pd
 
 
 def calculate_rsi(df, period=14):
     """
-    Calculate Relative Strength Index (RSI).
+    Calculate Relative Strength Index (RSI) using Wilder's smoothing.
 
     Args:
         df: OHLCV DataFrame with 'Adj Close' column.
@@ -24,8 +28,8 @@ def calculate_rsi(df, period=14):
     gain_series = pd.Series(gain, index=df.index)
     loss_series = pd.Series(loss, index=df.index)
 
-    avg_gain = gain_series.ewm(span=period, min_periods=period).mean()
-    avg_loss = loss_series.ewm(span=period, min_periods=period).mean()
+    avg_gain = gain_series.ewm(alpha=1/period, min_periods=period).mean()
+    avg_loss = loss_series.ewm(alpha=1/period, min_periods=period).mean()
 
     rs = avg_gain / avg_loss
     df['RSI'] = 100 - (100 / (1 + rs))

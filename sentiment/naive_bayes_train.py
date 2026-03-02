@@ -77,4 +77,4 @@ def train_naive_bayes(csv_file, output_dir='data'):
 
 
 if __name__ == '__main__':
-    train_naive_bayes('data/CrudeOil_News_Articles.csv')
+    train_naive_bayes('data/crude_oil_news_articles.csv')

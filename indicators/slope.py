@@ -1,5 +1,9 @@
 """Slope (linear regression angle) indicator."""
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import numpy as np
 import statsmodels.api as sm
 

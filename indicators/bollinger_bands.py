@@ -1,5 +1,9 @@
 """Bollinger Bands indicator."""
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 
 def calculate_bollinger_bands(df, window=20, std_dev=2):
     """
@@ -16,7 +20,7 @@ def calculate_bollinger_bands(df, window=20, std_dev=2):
     """
     df = df.copy()
     sma = df['Adj Close'].rolling(window=window).mean()
-    std = df['Adj Close'].rolling(window=window).std(ddof=0)
+    std = df['Adj Close'].rolling(window=window).std()
 
     df['BB_Middle'] = sma
     df['BB_Upper'] = sma + (std_dev * std)
