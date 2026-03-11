@@ -8,6 +8,7 @@ matplotlib
 statsmodels
 scikit-learn
 stocktrends
+Backtesting
 
 # Sentiment Analysis
 vaderSentiment

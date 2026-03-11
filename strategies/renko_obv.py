@@ -1,8 +1,9 @@
 """
-Renko + OBV Strategy
+Renko + OBV Strategy — Advanced Backtest
 
 Uses Renko brick patterns combined with OBV slope for entry/exit signals.
-Backtests on 5-minute intraday data.
+Backtests on intraday data using backtesting.py, then runs advanced
+validation (Monte Carlo, Walk-Forward, Stress Test, DSR) via vectorbt.
 """
 
 import sys
@@ -11,145 +12,187 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np
 import pandas as pd
-import copy
 import yfinance as yf
+from backtesting import Backtest, Strategy
 
 from indicators.renko import convert_to_renko
 from indicators.obv import calculate_obv
 from indicators.slope import calculate_slope
-from utils.kpi import cagr_from_returns, sharpe_ratio, max_drawdown, volatility
+from utils.backtesting import VBTBacktester
 
 # ----------------------------- CONFIG ----------------------------- #
-TICKERS = ["MSFT", "AAPL", "GOOGL", "META", "AMZN", "INTC",
-           "CSCO", "VZ", "IBM", "TSLA", "AMD"]
-PERIODS_PER_YEAR = 252 * 78
-RISK_FREE_RATE = 0.025
+TICKERS = ["NVDA", "AAPL", "GOOGL", "META", "AMZN", "MSFT", "TSLA"]
+CASH = 100_000
+COMMISSION = 0.001
 
 
-# ---------------------- STRATEGY LOGIC ---------------------- #
-def run_renko_obv_strategy(ohlc_dict):
-    """
-    Renko + OBV strategy:
-    - Buy when bar_num >= 2 and OBV slope > 30°
-    - Sell when bar_num <= -2 and OBV slope < -30°
-    - Exit when trend weakens
-    """
-    ohlc = copy.deepcopy(ohlc_dict)
-    tickers_signal = {}
-    tickers_ret = {}
-    ohlc_merged = {}
+# ---------------------- INDICATOR HELPERS ---------------------- #
+def _precompute_indicators(df):
+    """Merge Renko + OBV + slope into a single DataFrame."""
+    renko = convert_to_renko(df)
+    df = df.copy()
+    df['Date'] = df.index
+    df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)
 
-    # 1. Merge Renko + OBV indicators
-    for ticker in ohlc:
-        print(f"📊 Processing {ticker}")
-        df = ohlc[ticker]
+    if not renko.empty:
+        renko['date'] = pd.to_datetime(renko['date']).dt.tz_localize(None)
+        renko.rename(columns={'date': 'Date'}, inplace=True)
+        merged = df.merge(renko[['Date', 'bar_num']], how='outer', on='Date')
+    else:
+        merged = df.copy()
+        merged['bar_num'] = np.nan
 
-        # Renko
-        renko = convert_to_renko(df)
-        df['Date'] = df.index
-        df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)
+    merged['bar_num'] = merged['bar_num'].ffill()
+    merged = calculate_obv(merged)
+    merged['obv_slope'] = calculate_slope(merged['OBV'], 5)
+    merged.dropna(subset=['bar_num'], inplace=True)
+    merged.dropna(inplace=True)
 
-        if not renko.empty:
-            renko['date'] = pd.to_datetime(renko['date']).dt.tz_localize(None)
-            renko.rename(columns={'date': 'Date'}, inplace=True)
-            merged = df.merge(renko[['Date', 'bar_num']], how='outer', on='Date')
-        else:
-            merged = df.copy()
-            merged['bar_num'] = np.nan
+    for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+        if col not in merged.columns:
+            if col == 'Close' and 'Adj Close' in merged.columns:
+                merged['Close'] = merged['Adj Close']
+            elif col == 'Open' and 'Close' in merged.columns:
+                merged['Open'] = merged['Close']
 
-        merged['bar_num'] = merged['bar_num'].ffill()
+    merged.set_index('Date', inplace=True)
+    merged.index.name = None
+    return merged
 
-        # OBV + slope
-        merged = calculate_obv(merged)
-        merged['obv_slope'] = calculate_slope(merged['OBV'], 5)
 
-        merged.dropna(subset=['bar_num'], inplace=True)
-        ohlc_merged[ticker] = merged
-        tickers_signal[ticker] = ""
-        tickers_ret[ticker] = []
+# ---------------------- STRATEGY CLASS ---------------------- #
+class RenkoOBVStrategy(Strategy):
+    """Renko + OBV: Buy bar_num>=2 & slope>30, Sell bar_num<=-2 & slope<-30."""
 
-    # 2. Backtest
-    for ticker in ohlc_merged:
-        df = ohlc_merged[ticker]
-        for i in range(len(df)):
-            if i == 0:
-                tickers_ret[ticker].append(0)
-                continue
+    def init(self):
+        self.bar_num = self.I(lambda: self.data.bar_num, name='bar_num', overlay=False)
+        self.obv_slope = self.I(lambda: self.data.obv_slope, name='OBV Slope', overlay=False)
 
-            row = df.iloc[i]
-            prev_close = df['Adj Close'].iloc[i - 1]
-            current_close = row['Adj Close']
+    def next(self):
+        bar = self.bar_num[-1]
+        slope = self.obv_slope[-1]
+        buy_signal = bar >= 2 and slope > 30
+        sell_signal = bar <= -2 and slope < -30
 
-            if tickers_signal[ticker] == "":
-                tickers_ret[ticker].append(0)
-                if row['bar_num'] >= 2 and row['obv_slope'] > 30:
-                    tickers_signal[ticker] = "Buy"
-                elif row['bar_num'] <= -2 and row['obv_slope'] < -30:
-                    tickers_signal[ticker] = "Sell"
+        if not self.position:
+            if buy_signal:
+                self.buy()
+            elif sell_signal:
+                self.sell()
+        elif self.position.is_long:
+            if sell_signal:
+                self.position.close()
+                self.sell()
+            elif bar < 2:
+                self.position.close()
+        elif self.position.is_short:
+            if buy_signal:
+                self.position.close()
+                self.buy()
+            elif bar > -2:
+                self.position.close()
 
-            elif tickers_signal[ticker] == "Buy":
-                tickers_ret[ticker].append((current_close / prev_close) - 1)
-                if row['bar_num'] <= -2 and row['obv_slope'] < -30:
-                    tickers_signal[ticker] = "Sell"
-                elif row['bar_num'] < 2:
-                    tickers_signal[ticker] = ""
 
-            elif tickers_signal[ticker] == "Sell":
-                tickers_ret[ticker].append((prev_close / current_close) - 1)
-                if row['bar_num'] >= 2 and row['obv_slope'] > 30:
-                    tickers_signal[ticker] = "Buy"
-                elif row['bar_num'] > -2:
-                    tickers_signal[ticker] = ""
-
-        ohlc_merged[ticker]['ret'] = np.array(tickers_ret[ticker])
-
-    return ohlc_merged
+def _generate_vbt_signals(df):
+    """Generate vectorbt entry/exit signals from indicator data."""
+    entries = (df['bar_num'] >= 2) & (df['obv_slope'] > 30)
+    exits = (df['bar_num'] <= -2) & (df['obv_slope'] < -30)
+    return entries, exits
 
 
 # ----------------------------- MAIN ----------------------------- #
 def main():
-    print("--- Downloading 5-minute data ---")
+    print("=" * 60)
+    print("  Renko + OBV Strategy — Advanced Backtest")
+    print("=" * 60)
+
+    print("\n--- Downloading intraday data ---")
     ohlc_intraday = {}
     for ticker in TICKERS:
         try:
-            data = yf.download(ticker, interval='5m', period='60d',
+            data = yf.download(ticker, interval='15m', period='60d',
                                progress=False, auto_adjust=True)
             data.columns = ["Open", "High", "Low", "Adj Close", "Volume"]
             data['Close'] = data['Adj Close']
             data.dropna(inplace=True)
             ohlc_intraday[ticker] = data
-            print(f"✅ {ticker}: {len(data)} rows")
+            print(f"  ✅ {ticker}: {len(data)} rows")
         except Exception as e:
-            print(f"❌ {ticker}: {e}")
+            print(f"  ❌ {ticker}: {e}")
 
     tickers = list(ohlc_intraday.keys())
     if not tickers:
         raise ValueError("No data downloaded.")
 
-    print("\nRunning Renko + OBV strategy...")
-    results = run_renko_obv_strategy(ohlc_intraday)
+    # --- backtesting.py pass ---
+    all_stats = {}
+    for ticker in tickers:
+        print(f"\n📊 Backtesting {ticker} (backtesting.py)...")
+        try:
+            df = _precompute_indicators(ohlc_intraday[ticker])
+            if len(df) < 10:
+                print(f"  ⚠️ Skipping {ticker}: insufficient data")
+                continue
 
-    # Portfolio KPIs
-    strategy_df = pd.DataFrame({t: results[t]['ret'] for t in tickers})
-    strategy_df['ret'] = strategy_df.mean(axis=1)
+            bt = Backtest(df, RenkoOBVStrategy,
+                          cash=CASH, commission=COMMISSION,
+                          exclusive_orders=True, finalize_trades=True)
+            stats = bt.run()
+            all_stats[ticker] = {
+                'Return [%]': stats['Return [%]'],
+                'Sharpe Ratio': stats['Sharpe Ratio'],
+                'Max Drawdown [%]': stats['Max. Drawdown [%]'],
+                '# Trades': stats['# Trades'],
+                'Win Rate [%]': stats['Win Rate [%]'],
+            }
+            print(f"  Return: {stats['Return [%]']:.2f}%  "
+                  f"Sharpe: {stats['Sharpe Ratio']:.2f}  "
+                  f"Max DD: {stats['Max. Drawdown [%]']:.2f}%  "
+                  f"Trades: {stats['# Trades']}")
+        except Exception as e:
+            print(f"  ❌ Error: {e}")
 
-    print("\n--- 🎯 Overall Strategy KPIs ---")
-    print(f"CAGR: {cagr_from_returns(strategy_df['ret'], PERIODS_PER_YEAR) * 100:.2f}%")
-    print(f"Sharpe Ratio: {sharpe_ratio(strategy_df['ret'], RISK_FREE_RATE, PERIODS_PER_YEAR):.2f}")
-    print(f"Max Drawdown: {max_drawdown(strategy_df['ret']) * 100:.2f}%")
+    if all_stats:
+        print("\n" + "=" * 60)
+        print("--- 📈 Renko + OBV — backtesting.py Results ---")
+        print("=" * 60)
+        print(pd.DataFrame(all_stats).T.to_string(float_format=lambda x: f"{x:.2f}"))
 
-    # Individual KPIs
-    kpi = {}
-    for t in tickers:
-        r = results[t]['ret']
-        kpi[t] = {
-            'Return': cagr_from_returns(r, PERIODS_PER_YEAR),
-            'Sharpe Ratio': sharpe_ratio(r, RISK_FREE_RATE, PERIODS_PER_YEAR),
-            'Max Drawdown': max_drawdown(r),
-        }
+    # --- vectorbt advanced analysis (per-ticker) ---
+    for ticker in tickers:
+        if ticker not in all_stats:
+            continue
+        print(f"\n{'=' * 60}")
+        print(f"  🔬 Advanced Analysis: {ticker}")
+        print(f"{'=' * 60}")
 
-    print("\n--- 📈 Individual Stock KPIs ---")
-    print(pd.DataFrame(kpi).T)
+        try:
+            df = _precompute_indicators(ohlc_intraday[ticker])
+            entries, exits = _generate_vbt_signals(df)
+
+            bt_vbt = VBTBacktester(
+                close=df['Close'],
+                entries=entries,
+                exits=exits,
+                freq='15min',
+                init_cash=CASH,
+                commission=COMMISSION,
+            )
+            bt_vbt.full_analysis(n_mc=500, n_wf_splits=4, n_trials=len(TICKERS))
+        except Exception as e:
+            print(f"  ❌ VBT analysis error: {e}")
+
+    # --- ML/DL/RL Signal Enhancement ---
+    from utils.ml_signals import run_ml_comparison
+    for ticker in tickers:
+        if ticker not in all_stats:
+            continue
+        try:
+            df = _precompute_indicators(ohlc_intraday[ticker])
+            entries, exits = _generate_vbt_signals(df)
+            run_ml_comparison(df, entries, exits, ticker, freq='15min')
+        except Exception as e:
+            print(f"  ❌ ML error for {ticker}: {e}")
 
 
 if __name__ == '__main__':

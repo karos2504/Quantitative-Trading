@@ -11,6 +11,7 @@ from utils.kpi import (
     max_drawdown_from_prices,
     calmar_ratio,
 )
+from utils.backtesting import VBTBacktester
 
 __all__ = [
     'fetch_ohlcv_data',
@@ -23,4 +24,6 @@ __all__ = [
     'max_drawdown',
     'max_drawdown_from_prices',
     'calmar_ratio',
+    'VBTBacktester',
 ]
+
