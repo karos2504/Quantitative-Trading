@@ -2,18 +2,19 @@
 
 import numpy as np
 import pandas as pd
+from typing import Union
 
 
-def _to_scalar(val):
+def _to_scalar(val: Union[float, int, pd.Series, np.ndarray]) -> float:
     """Extract a Python float from potential Series/numpy scalar."""
     if hasattr(val, 'item'):
-        return val.item()
+        return float(val.item())
     if isinstance(val, pd.Series):
         return float(val.squeeze())
     return float(val)
 
 
-def cagr_from_prices(df, periods_per_year, price_col='Adj Close'):
+def cagr_from_prices(df: pd.DataFrame, periods_per_year: int, price_col: str = 'Adj Close') -> float:
     """
     Compound Annual Growth Rate from a price DataFrame.
 
@@ -32,7 +33,7 @@ def cagr_from_prices(df, periods_per_year, price_col='Adj Close'):
     return (end / start) ** (1 / years) - 1
 
 
-def cagr_from_returns(returns, periods_per_year):
+def cagr_from_returns(returns: pd.Series, periods_per_year: int) -> float:
     """
     Compound Annual Growth Rate from a returns Series.
 
@@ -50,7 +51,7 @@ def cagr_from_returns(returns, periods_per_year):
     return cumulative ** (1 / years) - 1
 
 
-def volatility(returns, periods_per_year):
+def volatility(returns: pd.Series, periods_per_year: int) -> float:
     """
     Annualized volatility from a returns Series.
 
@@ -64,7 +65,7 @@ def volatility(returns, periods_per_year):
     return _to_scalar(returns.std() * np.sqrt(periods_per_year))
 
 
-def sharpe_ratio(returns, risk_free_rate, periods_per_year):
+def sharpe_ratio(returns: pd.Series, risk_free_rate: float, periods_per_year: int) -> float:
     """
     Annualized Sharpe ratio.
 
@@ -87,7 +88,7 @@ def sharpe_ratio(returns, risk_free_rate, periods_per_year):
     return (mean_excess / std_excess) * np.sqrt(periods_per_year)
 
 
-def sortino_ratio(returns, risk_free_rate, periods_per_year):
+def sortino_ratio(returns: pd.Series, risk_free_rate: float, periods_per_year: int) -> float:
     """
     Annualized Sortino ratio (penalizes only downside volatility).
 
@@ -113,7 +114,7 @@ def sortino_ratio(returns, risk_free_rate, periods_per_year):
     return annualized_excess / downside_dev
 
 
-def max_drawdown(returns):
+def max_drawdown(returns: pd.Series) -> float:
     """
     Maximum drawdown from a returns Series.
 
@@ -129,7 +130,7 @@ def max_drawdown(returns):
     return _to_scalar(drawdown.min())
 
 
-def max_drawdown_from_prices(df, price_col='Adj Close'):
+def max_drawdown_from_prices(df: pd.DataFrame, price_col: str = 'Adj Close') -> float:
     """
     Maximum drawdown from a price DataFrame.
 
@@ -146,7 +147,7 @@ def max_drawdown_from_prices(df, price_col='Adj Close'):
     return _to_scalar(drawdown.min())
 
 
-def calmar_ratio(returns, periods_per_year):
+def calmar_ratio(returns: pd.Series, periods_per_year: int) -> float:
     """
     Calmar ratio: CAGR / |Max Drawdown|.
 

@@ -47,6 +47,7 @@ def fetch_magic_formula_data(ticker):
         "PrefStock": safe(bs, "Preferred Stock") or 0,
         "MinInterest": 0,
         "DivYield": info.get("dividendYield"),
+        "Cash": safe(bs, "Cash And Cash Equivalents") or safe(bs, "Cash") or 0,
     }
 
 
@@ -61,20 +62,22 @@ def main():
     df = pd.DataFrame.from_dict(financials, orient='index')
     df = df.apply(pd.to_numeric, errors='coerce')
 
-    # Total Enterprise Value
+    # Total Enterprise Value = MarketCap + Debt + PrefStock + MinInterest - Cash
     df["TEV"] = (
         df["MarketCap"].fillna(0)
         + df["TotDebt"].fillna(0)
         + df["PrefStock"].fillna(0)
         + df["MinInterest"].fillna(0)
-        - (df["CurrAsset"].fillna(0) - df["CurrLiab"].fillna(0))
+        - df["Cash"].fillna(0)
     )
 
     df["EarningYield"] = df["EBIT"] / df["TEV"]
     df["FCFYield"] = (df["CashFlowOps"] - df["Capex"]) / df["MarketCap"]
 
     # Invested Capital with floor to avoid division by zero
-    ic = df["PPE"].fillna(0) + df["CurrAsset"].fillna(0) - df["CurrLiab"].fillna(0)
+    # Invested Capital = Net Fixed Assets (PPE) + Net Working Capital
+    # Net Working Capital = Current Assets - Current Liabilities - Cash
+    ic = df["PPE"].fillna(0) + df["CurrAsset"].fillna(0) - df["CurrLiab"].fillna(0) - df["Cash"].fillna(0)
     df["ROC"] = df["EBIT"] / ic.apply(lambda x: max(x, 1000))
 
     df = df.dropna(subset=["EarningYield", "ROC", "DivYield"])

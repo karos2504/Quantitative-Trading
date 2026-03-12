@@ -22,3 +22,7 @@ alpha_vantage
 
 # Table formatting
 tabulate
+
+# Dev & Caching
+requests-cache
+pytest

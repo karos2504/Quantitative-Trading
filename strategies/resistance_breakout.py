@@ -21,20 +21,25 @@ from utils.backtesting import VBTBacktester
 
 # ----------------------------- CONFIG ----------------------------- #
 TICKERS = ["NVDA", "AAPL", "GOOGL", "META", "AMZN", "MSFT", "TSLA"]
-START_DATE = dt.datetime.today() - dt.timedelta(days=60)
+START_DATE = dt.datetime.today() - dt.timedelta(days=730)
 END_DATE = dt.datetime.today()
-INTERVAL = '15m'
+INTERVAL = '1h'
 CASH = 100_000
 COMMISSION = 0.001
 
 
 # ---------------------- INDICATOR HELPERS ---------------------- #
-def _precompute_indicators(df, atr_period=20, roll_period=20):
-    """Pre-compute ATR and rolling breakout levels."""
+def _precompute_indicators(df, atr_period=20, roll_period=14):
+    """Pre-compute ATR, rolling breakout levels, and Volume Z-Score."""
     df = calculate_atr(df, atr_period)
     df['roll_max_cp'] = df['High'].rolling(roll_period).max().shift(1)
     df['roll_min_cp'] = df['Low'].rolling(roll_period).min().shift(1)
-    df['roll_max_vol'] = df['Volume'].rolling(roll_period).max().shift(1)
+    
+    # Volume Z-Score (Mathematical Anomaly Detection)
+    vol_mean = df['Volume'].rolling(roll_period).mean().shift(1)
+    vol_std  = df['Volume'].rolling(roll_period).std().shift(1)
+    df['vol_zscore'] = (df['Volume'] - vol_mean) / (vol_std + 1e-9)
+    
     df.dropna(inplace=True)
     return df
 
@@ -43,64 +48,88 @@ def _precompute_indicators(df, atr_period=20, roll_period=20):
 class BreakoutStrategy(Strategy):
     """
     Breakout strategy:
-    - Buy when High breaks rolling max AND volume exceeds threshold
-    - Sell when Low breaks rolling min AND volume exceeds threshold
+    - Buy when High breaks rolling max + a fraction of ATR
+    - Sell when Low breaks rolling min - a fraction of ATR
+    - Volume must be a statistical anomaly (Z-Score > 2.0)
     - ATR-based stop-loss management
     """
-    vol_factor = 1.5
+    vol_z_threshold = 2.0
+    atr_breakout_coef = 0.5  # Requires breaking resistance by 0.5x ATR
 
     def init(self):
         self.atr = self.I(lambda: self.data.ATR, name='ATR', overlay=False)
         self.roll_max = self.I(lambda: self.data.roll_max_cp, name='Resist.', overlay=True)
         self.roll_min = self.I(lambda: self.data.roll_min_cp, name='Support', overlay=True)
-        self.roll_max_vol = self.I(lambda: self.data.roll_max_vol, name='Max Vol', overlay=False)
+        self.vol_zscore = self.I(lambda: self.data.vol_zscore, name='Vol Z-Score', overlay=False)
 
     def next(self):
         high = self.data.High[-1]
         low = self.data.Low[-1]
         close = self.data.Close[-1]
-        vol = self.data.Volume[-1]
         atr = self.atr[-1]
         r_max = self.roll_max[-1]
         r_min = self.roll_min[-1]
-        r_max_vol = self.roll_max_vol[-1]
+        vol_z = self.vol_zscore[-1]
 
-        vol_breakout = vol > self.vol_factor * r_max_vol
+        # Statistical volume anomaly confirmation
+        vol_breakout = vol_z > self.vol_z_threshold
+
+        # ATR-scaled mathematically significant breakout thresholds
+        long_trigger  = r_max + (atr * self.atr_breakout_coef)
+        short_trigger = r_min - (atr * self.atr_breakout_coef)
+
+        # Take-profit factor
+        tp_factor = 2.0 
 
         if not self.position:
-            if high >= r_max and vol_breakout:
-                self.buy(sl=close - atr)
-            elif low <= r_min and vol_breakout:
-                self.sell(sl=close + atr)
+            if high >= long_trigger and vol_breakout:
+                self.buy(sl=close - atr, tp=close + atr * tp_factor)
+            elif low <= short_trigger and vol_breakout:
+                self.sell(sl=close + atr, tp=close - atr * tp_factor)
 
         elif self.position.is_long:
             new_stop = close - atr
-            if hasattr(self, '_long_stop') and new_stop > self._long_stop:
-                self._long_stop = new_stop
+            if hasattr(self, '_long_stop'):
+                self._long_stop = max(self._long_stop, new_stop)
             else:
                 self._long_stop = new_stop
 
-            if low <= r_min and vol_breakout:
+            # Tighten SL dynamically on the active trade
+            for trade in self.trades:
+                if trade.is_long:
+                    if trade.sl is None or self._long_stop > trade.sl:
+                        trade.sl = self._long_stop
+
+            if low <= short_trigger and vol_breakout:
                 self.position.close()
-                self.sell(sl=close + atr)
+                self.sell(sl=close + atr, tp=close - atr * tp_factor)
 
         elif self.position.is_short:
             new_stop = close + atr
-            if hasattr(self, '_short_stop') and new_stop < self._short_stop:
-                self._short_stop = new_stop
+            if hasattr(self, '_short_stop'):
+                self._short_stop = min(self._short_stop, new_stop)
             else:
                 self._short_stop = new_stop
 
-            if high >= r_max and vol_breakout:
+            # Tighten SL dynamically on the active trade
+            for trade in self.trades:
+                if trade.is_short:
+                    if trade.sl is None or self._short_stop < trade.sl:
+                        trade.sl = self._short_stop
+
+            if high >= long_trigger and vol_breakout:
                 self.position.close()
-                self.buy(sl=close - atr)
+                self.buy(sl=close - atr, tp=close + atr * tp_factor)
 
 
-def _generate_vbt_signals(df, vol_factor=1.5):
-    """Generate vectorbt entry/exit signals from breakout indicator data."""
-    vol_breakout = df['Volume'] > vol_factor * df['roll_max_vol']
-    entries = (df['High'] >= df['roll_max_cp']) & vol_breakout
-    exits = (df['Low'] <= df['roll_min_cp']) & vol_breakout
+def _generate_vbt_signals(df, vol_z_threshold=2.0, atr_coef=0.5):
+    """Generate vectorbt entry/exit signals from mathematically filtered indicator data."""
+    vol_breakout = df['vol_zscore'] > vol_z_threshold
+    long_trigger  = df['roll_max_cp'] + (df['ATR'] * atr_coef)
+    short_trigger = df['roll_min_cp'] - (df['ATR'] * atr_coef)
+    
+    entries = (df['High'] >= long_trigger) & vol_breakout
+    exits = (df['Low'] <= short_trigger) & vol_breakout
     return entries, exits
 
 
@@ -191,16 +220,16 @@ def main():
             print(f"  ❌ VBT analysis error: {e}")
 
     # --- ML/DL/RL Signal Enhancement ---
-    from utils.ml_signals import run_ml_comparison
-    for ticker in tickers:
-        if ticker not in all_stats:
-            continue
-        try:
-            df = _precompute_indicators(ohlcv[ticker])
-            entries, exits = _generate_vbt_signals(df)
-            run_ml_comparison(df, entries, exits, ticker, freq='15min')
-        except Exception as e:
-            print(f"  ❌ ML error for {ticker}: {e}")
+    # from utils.ml_signals import run_ml_comparison
+    # for ticker in tickers:
+    #     if ticker not in all_stats:
+    #         continue
+    #     try:
+    #         df = _precompute_indicators(ohlcv[ticker])
+    #         entries, exits = _generate_vbt_signals(df)
+    #         run_ml_comparison(df, entries, exits, ticker, freq='15min')
+    #     except Exception as e:
+    #         print(f"  ❌ ML error for {ticker}: {e}")
 
 
 if __name__ == '__main__':

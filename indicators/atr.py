@@ -29,7 +29,7 @@ def calculate_atr(df, period=14):
         (low - close.shift()).abs(),
     ], axis=1).max(axis=1)
 
-    df['ATR'] = tr.ewm(span=period, adjust=False).mean()
+    df['ATR'] = tr.ewm(alpha=1/period, adjust=False).mean()
     return df
 
 

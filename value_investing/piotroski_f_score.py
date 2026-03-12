@@ -108,7 +108,10 @@ def piotroski_f_score(all_data):
             f4 = int(cfo_roa > roa_cy)
 
             # Leverage / Liquidity (3 pts)
-            f5 = int(val(cy["LTDebt"]) < val(py["LTDebt"]))
+            lev_cy = safe_div(cy["LTDebt"], cy["TotAssets"])
+            lev_py = safe_div(py["LTDebt"], py["TotAssets"])
+            # F5: Score 1 if the leverage ratio fell or if it remained zero
+            f5 = int(lev_cy < lev_py or (lev_cy == 0 and lev_py == 0))
             f6 = int(cr_cy > cr_py)
             f7 = int(val(cy["CommStock"]) <= val(py["CommStock"]))
 

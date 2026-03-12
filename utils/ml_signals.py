@@ -443,11 +443,25 @@ def run_ml_comparison(df, raw_entries, raw_exits, ticker, freq='D',
         print(f"  ❌ Raw baseline error: {e}")
         return
 
-    models = {
-        '🌲 XGBoost': XGBSignalFilter(),
-        '🧠 LSTM': LSTMSignalFilter(seq_len=min(10, split // 10), epochs=10),
-        '🎮 PPO (RL)': PPOTradingAgent(total_timesteps=min(3000, split)),
-    }
+    models = {}
+    try:
+        models['🌲 XGBoost'] = XGBSignalFilter()
+    except ImportError:
+        print("  ⚠️ XGBoost not installed. Skipping XGB ML filter.")
+    
+    try:
+        models['🧠 LSTM'] = LSTMSignalFilter(seq_len=min(10, split // 10), epochs=10)
+    except ImportError:
+        print("  ⚠️ PyTorch not installed. Skipping LSTM DL filter.")
+        
+    try:
+        models['🎮 PPO (RL)'] = PPOTradingAgent(total_timesteps=min(3000, split))
+    except ImportError:
+        print("  ⚠️ Stable-Baselines3/Gymnasium not installed. Skipping RL agent.")
+
+    if not models:
+        print("  ⚠️ No ML libraries installed. Proceeding with raw signals only.")
+        return
 
     for name, model in models.items():
         print(f"\n  --- {name} ---")

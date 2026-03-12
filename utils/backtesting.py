@@ -76,8 +76,11 @@ class VBTBacktester:
             slippage: Slippage percentage per trade.
         """
         self.close = close.squeeze() if isinstance(close, pd.DataFrame) else close
+        self.close = self.close.astype(float)
         self.entries = entries.squeeze() if isinstance(entries, pd.DataFrame) else entries
+        self.entries = self.entries.astype(bool)
         self.exits = exits.squeeze() if isinstance(exits, pd.DataFrame) else exits
+        self.exits = self.exits.astype(bool)
         self.freq = freq
         self.init_cash = init_cash
         self.commission = commission
@@ -251,21 +254,14 @@ class VBTBacktester:
 
         n = len(self.close)
         window_size = n // n_splits
-        train_size = int(window_size * train_ratio)
-        test_size = window_size - train_size
-
         windows = []
         for i in range(n_splits):
             start = i * window_size
-            train_end = start + train_size
-            test_end = min(start + window_size, n)
+            test_end = min((i + 1) * window_size, n)
 
-            if test_end <= train_end:
-                continue
-
-            test_close = self.close.iloc[train_end:test_end]
-            test_entries = self.entries.iloc[train_end:test_end]
-            test_exits = self.exits.iloc[train_end:test_end]
+            test_close = self.close.iloc[start:test_end]
+            test_entries = self.entries.iloc[start:test_end]
+            test_exits = self.exits.iloc[start:test_end]
 
             if len(test_close) < 5:
                 continue
@@ -283,8 +279,6 @@ class VBTBacktester:
                 ret = pf.returns()
                 windows.append({
                     'window': i + 1,
-                    'train_period': f"{self.close.index[start].strftime('%Y-%m-%d')} → "
-                                    f"{self.close.index[min(train_end - 1, n - 1)].strftime('%Y-%m-%d')}",
                     'test_period': f"{test_close.index[0].strftime('%Y-%m-%d')} → "
                                    f"{test_close.index[-1].strftime('%Y-%m-%d')}",
                     'total_return': float(pf.total_return()),
@@ -314,8 +308,7 @@ class VBTBacktester:
 
         if print_report:
             print("\n" + "=" * 60)
-            print(f"  🔄 Walk-Forward Analysis ({len(windows)} windows, "
-                  f"{int(train_ratio * 100)}% train / {int((1 - train_ratio) * 100)}% test)")
+            print(f"  🔄 Sub-period Analysis ({len(windows)} independent windows)")
             print("=" * 60)
 
             wf_df = pd.DataFrame(windows)
@@ -354,14 +347,21 @@ class VBTBacktester:
         results = {}
 
         for name, crisis in scenarios.items():
+            ann_factor = getattr(self._portfolio, 'ann_factor', 252)
+            period_ratio = max(1, 252 / ann_factor)
+            
+            crisis_duration = max(1, int(crisis['duration_days'] / period_ratio))
+            crisis_mean = crisis['daily_mean'] * period_ratio
+            crisis_std = crisis['daily_std'] * np.sqrt(period_ratio)
+            
             crisis_returns = np.random.normal(
-                crisis['daily_mean'], crisis['daily_std'], crisis['duration_days']
+                crisis_mean, crisis_std, crisis_duration
             )
 
             # Insert crisis at random position
-            insert_pos = np.random.randint(0, max(1, len(returns) - crisis['duration_days']))
+            insert_pos = np.random.randint(0, max(1, len(returns) - crisis_duration))
             stressed = returns.copy()
-            end_pos = min(insert_pos + crisis['duration_days'], len(stressed))
+            end_pos = min(insert_pos + crisis_duration, len(stressed))
             actual_len = end_pos - insert_pos
             stressed[insert_pos:end_pos] = crisis_returns[:actual_len]
 
@@ -413,34 +413,41 @@ class VBTBacktester:
 
         returns = self._returns.values.flatten()
         n = len(returns)
-        sr = self._calc_sharpe(returns)
+
+        period_std = np.std(returns, ddof=1)
+        period_sr = np.mean(returns) / period_std if period_std > 0 else 0.0
+            
         skew = float(scipy_stats.skew(returns))
         kurt = float(scipy_stats.kurtosis(returns, fisher=True))
 
-        # Expected max Sharpe under null (Euler-Mascheroni approximation)
         euler_mascheroni = 0.5772156649
         if n_trials > 1:
-            sr_max = np.sqrt(2 * np.log(n_trials)) * (
+            z_max = np.sqrt(2 * np.log(n_trials)) * (
                 1 - euler_mascheroni / (2 * np.log(n_trials))
             ) + euler_mascheroni / np.sqrt(2 * np.log(n_trials))
         else:
-            sr_max = 0.0
+            z_max = 0.0
 
-        # DSR test statistic
         sr_std = np.sqrt(
-            (1 - skew * sr + (kurt - 1) / 4 * sr ** 2) / (n - 1)
+            (1 - skew * period_sr + (kurt - 1) / 4 * period_sr ** 2) / max(1, n - 1)
         )
+        
+        expected_max_sr = z_max * sr_std
 
         if sr_std > 0:
-            dsr_stat = (sr - sr_max) / sr_std
+            dsr_stat = (period_sr - expected_max_sr) / sr_std
             p_value = 1 - scipy_stats.norm.cdf(dsr_stat)
         else:
             dsr_stat = 0.0
             p_value = 1.0
+            
+        ann_factor = getattr(self._portfolio, 'ann_factor', 252)
+        sr_ann = period_sr * np.sqrt(ann_factor)
+        sr_max_ann = expected_max_sr * np.sqrt(ann_factor)
 
         result = {
-            'observed_sharpe': sr,
-            'expected_max_sharpe': sr_max,
+            'observed_sharpe': sr_ann,
+            'expected_max_sharpe': sr_max_ann,
             'dsr_statistic': dsr_stat,
             'p_value': p_value,
             'n_trials': n_trials,
@@ -453,8 +460,8 @@ class VBTBacktester:
             print("\n" + "=" * 60)
             print(f"  🛡️ Deflated Sharpe Ratio (n_trials={n_trials})")
             print("=" * 60)
-            print(f"  Observed Sharpe:      {sr:>8.4f}")
-            print(f"  Expected Max Sharpe:  {sr_max:>8.4f}")
+            print(f"  Observed Sharpe:      {sr_ann:>8.4f}")
+            print(f"  Expected Max Sharpe:  {sr_max_ann:>8.4f}")
             print(f"  DSR Statistic:        {dsr_stat:>8.4f}")
             print(f"  P-value:              {p_value:>8.4f}")
             print(f"  Skewness:             {skew:>8.4f}")
@@ -493,8 +500,7 @@ class VBTBacktester:
             return 0.0
         return float(np.mean(r) / np.std(r, ddof=1) * np.sqrt(periods_per_year))
 
-    @staticmethod
-    def _calc_max_dd(returns):
+    def _calc_max_dd(self, returns):
         """Maximum drawdown from a returns array."""
         r = np.array(returns)
         cumulative = np.cumprod(1 + r)

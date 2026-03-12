@@ -1,10 +1,15 @@
 """Shared data fetching utilities for the Quantitative Trading project."""
 
 import yfinance as yf
+import pandas as pd
+from typing import List, Dict, Optional, Union
+import datetime
 
 
-def fetch_ohlcv_data(tickers, period=None, interval='1d', start=None, end=None,
-                     auto_adjust=False, progress=False):
+def fetch_ohlcv_data(tickers: List[str], period: Optional[str] = None, interval: str = '1d', 
+                     start: Optional[Union[str, datetime.datetime]] = None, 
+                     end: Optional[Union[str, datetime.datetime]] = None,
+                     auto_adjust: bool = False, progress: bool = False) -> Dict[str, pd.DataFrame]:
     """
     Fetch OHLCV data for a list of tickers from Yahoo Finance.
 
@@ -23,7 +28,7 @@ def fetch_ohlcv_data(tickers, period=None, interval='1d', start=None, end=None,
     Returns:
         dict[str, pd.DataFrame]: Ticker → OHLCV DataFrame.
     """
-    data = {}
+    data: Dict[str, pd.DataFrame] = {}
     for ticker in tickers:
         try:
             kwargs = {
@@ -38,6 +43,8 @@ def fetch_ohlcv_data(tickers, period=None, interval='1d', start=None, end=None,
                 kwargs['period'] = period
 
             df = yf.download(ticker, **kwargs).dropna()
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
             if not df.empty:
                 data[ticker] = df
         except Exception as e:
@@ -45,7 +52,7 @@ def fetch_ohlcv_data(tickers, period=None, interval='1d', start=None, end=None,
     return data
 
 
-def fetch_financial_data(ticker):
+def fetch_financial_data(ticker: str) -> Optional[Dict[str, pd.DataFrame]]:
     """
     Fetch financial statements (balance sheet, income statement, cash flow)
     and key stats for a single ticker.
