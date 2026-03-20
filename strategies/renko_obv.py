@@ -9,15 +9,29 @@ Key Improvements over v2.0:
   * All v2.0 features preserved: ADX, BB squeeze, ER, OBV Z-score.
 """
 
+import numpy as np
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import numpy as np
-import pandas as pd
-import yfinance as yf
-from backtesting import Backtest, Strategy
+import os
+# Suppress resource_tracker warnings across all processes (especially on macOS/Python 3.14)
+os.environ['PYTHONWARNINGS'] = 'ignore:resource_tracker:UserWarning'
 
+import multiprocessing
+if os.name == 'posix':
+    try:
+        if multiprocessing.get_start_method(allow_none=True) is None:
+            multiprocessing.set_start_method('spawn', force=True)
+    except (RuntimeError, ValueError):
+        pass
+
+import yfinance as yf
+import backtesting
+backtesting.Pool = multiprocessing.Pool
+
+from backtesting import Backtest, Strategy
+from utils.strategy_runner import run_strategy_pipeline
 from indicators.renko import convert_to_renko
 from indicators.obv import calculate_obv
 from indicators.atr import calculate_atr
@@ -190,23 +204,6 @@ def _generate_vbt_signals(df, bar_threshold=6, er_threshold=0.65,
     return entries, exits
 
 
-# ---------------------- PARAM EXTRACTION HELPER ---------------------- #
-def _extract_best_params(opt_stats) -> dict:
-    """
-    Extract the winning parameter set from backtesting.py optimization results.
-    backtesting.py stores the best combo as class attributes on opt_stats._strategy.
-    """
-    strat = opt_stats._strategy
-    return dict(
-        bar_threshold   = int(strat.bar_threshold),
-        er_threshold    = float(strat.er_threshold),
-        obv_z_threshold = float(strat.obv_z_threshold),
-        tp_factor       = float(strat.tp_factor),
-        sl_factor       = float(strat.sl_factor),
-        adx_threshold   = int(strat.adx_threshold),
-    )
-
-
 # ----------------------------- MAIN ----------------------------- #
 def main():
     print("=" * 70)
@@ -234,156 +231,33 @@ def main():
     if not tickers:
         raise ValueError("No data downloaded.")
 
-    # ------------------------------------------------------------------
-    # 2. Optimize → extract best params → re-run clean final backtest
-    # ------------------------------------------------------------------
-    all_stats   = {}
-    best_params = {}
-
-    for ticker in tickers:
-        print(f"\n{'─' * 60}")
-        print(f"📊  {ticker} — Step 1: Optimizing …")
-
-        try:
-            df = _precompute_indicators(ohlc_intraday[ticker])
-            if len(df) < 50:
-                print(f"  ⚠️  Skipping {ticker}: insufficient data")
-                continue
-
-            bt = Backtest(df, RenkoOBVStrategy,
-                          cash=CASH, commission=COMMISSION,
-                          exclusive_orders=True, finalize_trades=True)
-
-            # ── Optimization pass ──────────────────────────────────────
-            params = DEFAULT_PARAMS.copy()
-            try:
-                opt_stats = bt.optimize(
-                    bar_threshold   = list(range(3, 7, 1)),
-                    er_threshold    = list(np.arange(0.3, 0.7, 0.1)),
-                    tp_factor       = list(np.arange(1.0, 2.0, 0.1)),
-                    sl_factor       = list(np.arange(0.5, 1.0, 0.1)),
-                    obv_z_threshold = list(np.arange(1.0, 3.0, 0.1)),
-                    maximize        = 'Sharpe Ratio',
-                    max_tries       = 27,
-                    return_heatmap  = False,
-                )
-
-                if opt_stats['# Trades'] >= 10:
-                    params = _extract_best_params(opt_stats)
-                    print(f"  ✅ Optimization complete. Best params: {params}")
-                else:
-                    print(f"  ⚠️  Only {opt_stats['# Trades']} trades found — "
-                          f"falling back to defaults")
-
-            except Exception as opt_err:
-                print(f"  ⚠️  Optimization failed ({opt_err}) — using defaults")
-
-            best_params[ticker] = params
-
-            # ── Final backtest using best (or default) params ──────────
-            print(f"📊  {ticker} — Step 2: Final backtest with best params …")
-            final_stats = bt.run(**params)
-
-            if final_stats['# Trades'] < 10:
-                print(f"  ⚠️  {ticker}: only {final_stats['# Trades']} trades — "
-                      f"interpret results cautiously")
-
-            all_stats[ticker] = {
-                'Return [%]':       final_stats['Return [%]'],
-                'Sharpe Ratio':     final_stats['Sharpe Ratio'],
-                'Max Drawdown [%]': final_stats['Max. Drawdown [%]'],
-                '# Trades':         final_stats['# Trades'],
-                'Win Rate [%]':     final_stats['Win Rate [%]'],
-                # Best params for traceability
-                'bar_threshold':    params['bar_threshold'],
-                'er_threshold':     params['er_threshold'],
-                'obv_z_threshold':  params['obv_z_threshold'],
-                'tp_factor':        params['tp_factor'],
-                'adx_threshold':    params['adx_threshold'],
-            }
-
-            print(
-                f"  ✅ Return: {final_stats['Return [%]']:.2f}%  "
-                f"Sharpe: {final_stats['Sharpe Ratio']:.2f}  "
-                f"Max DD: {final_stats['Max. Drawdown [%]']:.2f}%  "
-                f"Trades: {final_stats['# Trades']}"
-            )
-
-        except Exception as e:
-            print(f"  ❌ Error for {ticker}: {e}")
-
-    # ------------------------------------------------------------------
-    # 3. Summary tables
-    # ------------------------------------------------------------------
-    if all_stats:
-        print("\n" + "=" * 70)
-        print("  FINAL BACKTEST RESULTS (using optimized parameters per ticker)")
-        print("=" * 70)
-        print(pd.DataFrame(all_stats).T.to_string(float_format=lambda x: f"{x:.2f}"))
-
-        print("\n" + "─" * 70)
-        print("  Best Parameters Per Ticker")
-        print("─" * 70)
-        print(pd.DataFrame(best_params).T.to_string(float_format=lambda x: f"{x:.2f}"))
-
-    # ------------------------------------------------------------------
-    # 4. VBT advanced analysis with best params
-    # ------------------------------------------------------------------
-    for ticker in tickers:
-        if ticker not in all_stats:
-            continue
-        print(f"\n{'=' * 70}")
-        print(f"  Advanced VBT Analysis: {ticker}  (best params)")
-        print(f"{'=' * 70}")
-
-        try:
-            df = _precompute_indicators(ohlc_intraday[ticker])
-            p  = best_params[ticker]
-            entries, exits = _generate_vbt_signals(
-                df,
-                bar_threshold   = p['bar_threshold'],
-                er_threshold    = p['er_threshold'],
-                obv_z_threshold = p['obv_z_threshold'],
-                adx_threshold   = p['adx_threshold'],
-            )
-
-            bt_vbt = VBTBacktester(
-                close      = df['Close'],
-                entries    = entries,
-                exits      = exits,
-                freq       = '1h',
-                init_cash  = CASH,
-                commission = COMMISSION,
-            )
-            bt_vbt.full_analysis(n_mc=500, n_wf_splits=4, n_trials=len(TICKERS))
-
-        except Exception as e:
-            print(f"  ❌ VBT error: {e}")
-
-    # ------------------------------------------------------------------
-    # 5. ML/DL/RL signal enhancement (uses best params for signal gen)
-    # ------------------------------------------------------------------
-    try:
-        from utils.ml_signals import run_ml_comparison
-        for ticker in tickers:
-            if ticker not in all_stats:
-                continue
-            try:
-                df = _precompute_indicators(ohlc_intraday[ticker])
-                p  = best_params[ticker]
-                entries, exits = _generate_vbt_signals(
-                    df,
-                    bar_threshold   = p['bar_threshold'],
-                    er_threshold    = p['er_threshold'],
-                    obv_z_threshold = p['obv_z_threshold'],
-                    adx_threshold   = p['adx_threshold'],
-                )
-                run_ml_comparison(df, entries, exits, ticker, freq='1h')
-            except Exception as e:
-                print(f"  ❌ ML error for {ticker}: {e}")
-    except ImportError:
-        print("\n  ⚠️  ML libraries not available. Skipping ML signal enhancement.")
+    run_strategy_pipeline(
+        strategy_name="Renko + OBV Strategy",
+        ohlcv_data=ohlc_intraday,
+        strategy_class=RenkoOBVStrategy,
+        default_params=DEFAULT_PARAMS,
+        param_grid=dict(
+            bar_threshold   = list(range(3, 7, 1)),
+            er_threshold    = list(np.arange(0.3, 0.7, 0.1)),
+            tp_factor       = list(np.arange(1.0, 2.0, 0.1)),
+            sl_factor       = list(np.arange(0.5, 1.0, 0.1)),
+            obv_z_threshold = list(np.arange(1.0, 3.0, 0.1)),
+        ),
+        precompute_fn=_precompute_indicators,
+        vbt_signal_fn=_generate_vbt_signals,
+        cash=CASH,
+        commission=COMMISSION,
+        freq='1h'
+    )
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    finally:
+        # Explicitly shut down loky to prevent leaked semaphore warnings on exit
+        try:
+            from joblib.externals.loky import get_reusable_executor
+            get_reusable_executor().shutdown(wait=True)
+        except (ImportError, AttributeError):
+            pass

@@ -12,7 +12,19 @@ Improvements over v6:
 """
 
 import sys
+import os
+# Suppress resource_tracker warnings across all processes (especially on macOS/Python 3.14)
+os.environ['PYTHONWARNINGS'] = 'ignore:resource_tracker:UserWarning'
+import multiprocessing
 from pathlib import Path
+
+if os.name == 'posix':
+    try:
+        if multiprocessing.get_start_method(allow_none=True) is None:
+            multiprocessing.set_start_method('spawn', force=True)
+    except (RuntimeError, ValueError):
+        pass
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import warnings
@@ -363,9 +375,11 @@ def build_dashboard(
     spy_eq   = (1 + spy_ts).cumprod() * 100_000
     roll_max = equity.cummax()
     drawdown = (equity - roll_max) / roll_max * 100
+    roll_std = strat_ts.rolling(12).std()
     roll_sharpe = (
-        strat_ts.rolling(12).mean() / strat_ts.rolling(12).std()
+        strat_ts.rolling(12).mean() / roll_std.replace(0, np.nan)
     ) * np.sqrt(12)
+    roll_sharpe = roll_sharpe.fillna(0)
 
     # Monthly returns heatmap
     df_ret = strat_ts.to_frame("ret")
@@ -653,5 +667,13 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    finally:
+        # Explicitly shut down loky to prevent leaked semaphore warnings on exit
+        try:
+            from joblib.externals.loky import get_reusable_executor
+            get_reusable_executor().shutdown(wait=True)
+        except (ImportError, AttributeError):
+            pass
     
