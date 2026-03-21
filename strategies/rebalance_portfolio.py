@@ -41,8 +41,9 @@ from plotly.subplots import make_subplots
 from pypfopt import EfficientFrontier, risk_models
 from pypfopt.exceptions import OptimizationError
 
-from utils.data import fetch_ohlcv_data
-from utils.backtesting import VBTBacktester
+from data_ingestion.data import fetch_ohlcv_data
+from backtesting_engine.backtesting import VBTBacktester
+from config.settings import CASH, COMMISSION
 
 # ============================================================
 #  CONFIG
@@ -131,7 +132,7 @@ def _to_period_index(s: pd.Series) -> pd.Series:
 # ============================================================
 def build_prices(data: dict) -> pd.DataFrame:
     return pd.DataFrame(
-        {t: df['Adj Close'] for t, df in data.items()}
+        {t: df['Close'] for t, df in data.items()}
     ).dropna(how='all').ffill(limit=2)
 
 def compute_returns(prices: pd.DataFrame) -> pd.DataFrame:
@@ -188,14 +189,29 @@ def markowitz_weights(candidates, returns_hist, momentum_scores):
 # ============================================================
 def _detect_regime(spy_prices_daily):
     """
-    Detect bull/bear regime using SPY 200-day MA.
-    Returns a Series of booleans (True = bull, False = bear).
+    Detect bull/bear regime using Gaussian HMM.
+    Returns a Series of booleans (True = bull/low-vol, False = bear/high-vol).
     """
-    if spy_prices_daily is None or len(spy_prices_daily) < 200:
+    if spy_prices_daily is None or len(spy_prices_daily) < 50:
         return None
-    ma200 = spy_prices_daily.rolling(200).mean()
-    regime = spy_prices_daily > ma200
-    return regime
+        
+    try:
+        from portfolio_construction.regime_hmm import fit_hmm_regimes
+        regime_labels = fit_hmm_regimes(spy_prices_daily, n_components=2)
+        
+        # We need to map the hidden state (0 or 1) to Bull (True) or Bear (False).
+        # Low volatility is historically associated with Bull markets.
+        returns = spy_prices_daily.pct_change()
+        vol_0 = returns[regime_labels == 0].std()
+        vol_1 = returns[regime_labels == 1].std()
+        
+        bull_state = 0 if vol_0 < vol_1 else 1
+        
+        return regime_labels == bull_state
+    except Exception as e:
+        print(f"  ⚠️ HMM Regime detection failed: {e}. Falling back to 200-MA.")
+        ma200 = spy_prices_daily.rolling(200).mean()
+        return spy_prices_daily > ma200
 
 
 def run_strategy(prices, returns, mom_12_1, mom_6_1, spy_regime=None):
@@ -575,7 +591,7 @@ def main():
     elif "Close" in spy_raw.columns:
         spy_price = spy_raw["Close"]
     else:
-        spy_price = spy_raw["Adj Close"]
+        spy_price = spy_raw['Close']
 
     if isinstance(spy_price, pd.DataFrame):
         spy_price = spy_price.iloc[:, 0]
@@ -595,7 +611,7 @@ def main():
         elif "Close" in spy_daily.columns:
             spy_daily_close = spy_daily["Close"]
         else:
-            spy_daily_close = spy_daily["Adj Close"]
+            spy_daily_close = spy_daily['Close']
         if isinstance(spy_daily_close, pd.DataFrame):
             spy_daily_close = spy_daily_close.iloc[:, 0]
         spy_regime = _detect_regime(spy_daily_close)
@@ -606,8 +622,10 @@ def main():
         print(f"  ⚠️ Regime detection skipped: {e}")
 
     # ── Strategy data ─────────────────────────────────────────────────────
-    print("  Fetching price data...")
-    ohlcv   = fetch_ohlcv_data(SP500_UNIVERSE, start=START_DATE, end=END_DATE, interval='1mo')
+    print("  Fetching price data from store...")
+    from data_ingestion.data_store import load_universe_data, update_universe_data
+    update_universe_data(SP500_UNIVERSE, start=START_DATE, end=END_DATE, interval='1mo')
+    ohlcv   = load_universe_data(SP500_UNIVERSE, interval='1mo')
     prices  = build_prices(ohlcv)
     returns = compute_returns(prices).dropna(how='all')
     prices  = prices.reindex(returns.index)
@@ -640,7 +658,7 @@ def main():
 
     bt = VBTBacktester(
         close=strategy_close, entries=entries, exits=exits,
-        freq='30D', init_cash=100_000, commission=0.001,
+        freq='30D', init_cash=CASH, commission=COMMISSION,
     )
     bt.full_analysis(n_mc=1000, n_wf_splits=5, n_trials=1)
 

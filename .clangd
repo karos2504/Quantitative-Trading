@@ -1,0 +1,6 @@
+CompileFlags:
+  Add:
+    - -I/opt/homebrew/opt/python@3.14/Frameworks/Python.framework/Versions/3.14/include/python3.14
+    - -I/opt/homebrew/lib/python3.14/site-packages/pybind11/include
+    - -std=c++17
+    - -Wno-unused-includes

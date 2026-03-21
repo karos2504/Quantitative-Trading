@@ -1,0 +1,14 @@
+[
+{
+  "directory": "/Users/karos/Documents/Quantitative Research/execution_core/build",
+  "command": "/usr/bin/c++ -Dhft_execution_EXPORTS -I\"/Users/karos/Documents/Quantitative Research/execution_core/include\" -isystem /opt/homebrew/include -isystem /opt/homebrew/opt/python@3.14/Frameworks/Python.framework/Versions/3.14/include/python3.14 -std=gnu++17 -arch arm64 -fPIC -fvisibility=hidden -O3 -march=native -funroll-loops -flto -o CMakeFiles/hft_execution.dir/src/order_manager.cpp.o -c \"/Users/karos/Documents/Quantitative Research/execution_core/src/order_manager.cpp\"",
+  "file": "/Users/karos/Documents/Quantitative Research/execution_core/src/order_manager.cpp",
+  "output": "CMakeFiles/hft_execution.dir/src/order_manager.cpp.o"
+},
+{
+  "directory": "/Users/karos/Documents/Quantitative Research/execution_core/build",
+  "command": "/usr/bin/c++ -Dhft_execution_EXPORTS -I\"/Users/karos/Documents/Quantitative Research/execution_core/include\" -isystem /opt/homebrew/include -isystem /opt/homebrew/opt/python@3.14/Frameworks/Python.framework/Versions/3.14/include/python3.14 -std=gnu++17 -arch arm64 -fPIC -fvisibility=hidden -O3 -march=native -funroll-loops -flto -o CMakeFiles/hft_execution.dir/src/bindings.cpp.o -c \"/Users/karos/Documents/Quantitative Research/execution_core/src/bindings.cpp\"",
+  "file": "/Users/karos/Documents/Quantitative Research/execution_core/src/bindings.cpp",
+  "output": "CMakeFiles/hft_execution.dir/src/bindings.cpp.o"
+}
+]

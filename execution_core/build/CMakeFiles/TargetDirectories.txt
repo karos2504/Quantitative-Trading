@@ -1,0 +1,3 @@
+/Users/karos/Documents/Quantitative Research/execution_core/build/CMakeFiles/hft_execution.dir
+/Users/karos/Documents/Quantitative Research/execution_core/build/CMakeFiles/edit_cache.dir
+/Users/karos/Documents/Quantitative Research/execution_core/build/CMakeFiles/rebuild_cache.dir

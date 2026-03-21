@@ -19,8 +19,8 @@ def calculate_bollinger_bands(df, window=20, std_dev=2):
                        'BB_Width' columns added.
     """
     df = df.copy()
-    sma = df['Adj Close'].rolling(window=window).mean()
-    std = df['Adj Close'].rolling(window=window).std()
+    sma = df['Close'].rolling(window=window).mean()
+    std = df['Close'].rolling(window=window).std()
 
     df['BB_Middle'] = sma
     df['BB_Upper'] = sma + (std_dev * std)
@@ -30,7 +30,7 @@ def calculate_bollinger_bands(df, window=20, std_dev=2):
 
 
 if __name__ == '__main__':
-    from utils.data import fetch_ohlcv_data
+    from data_ingestion.data import fetch_ohlcv_data
 
     tickers = ['AAPL', 'MSFT', 'GOOG']
     data = fetch_ohlcv_data(tickers, period='1mo', interval='5m')

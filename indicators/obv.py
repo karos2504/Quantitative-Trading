@@ -31,7 +31,7 @@ def calculate_obv(df):
 
 if __name__ == '__main__':
     import datetime
-    from utils.data import fetch_ohlcv_data
+    from data_ingestion.data import fetch_ohlcv_data
 
     start = datetime.date.today() - datetime.timedelta(days=365)
     end = datetime.date.today()

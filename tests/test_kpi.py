@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 import pandas as pd
-from utils.kpi import cagr_from_returns, volatility, sharpe_ratio, sortino_ratio, max_drawdown
+from portfolio_construction.kpi import cagr_from_returns, volatility, sharpe_ratio, sortino_ratio, max_drawdown
 
 @pytest.fixture
 def mock_returns():

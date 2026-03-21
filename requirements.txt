@@ -26,3 +26,4 @@ tabulate
 # Dev & Caching
 requests-cache
 pytest
+streamlit

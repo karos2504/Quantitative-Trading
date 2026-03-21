@@ -1,7 +1,7 @@
 """
 KPI Demo
 
-Demonstrates all KPI functions from utils.kpi using sample stock data.
+Demonstrates all KPI functions from portfolio_construction.kpi using sample stock data.
 Replaces the 4 separate KPI scripts that were in the old project.
 """
 
@@ -9,8 +9,8 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from utils.data import fetch_ohlcv_data
-from utils.kpi import (
+from data_ingestion.data import fetch_ohlcv_data
+from portfolio_construction.kpi import (
     cagr_from_prices,
     volatility,
     sharpe_ratio,
@@ -35,7 +35,7 @@ def main():
             continue
 
         df = data[ticker]
-        returns = df['Adj Close'].pct_change().dropna()
+        returns = df['Close'].pct_change().dropna()
 
         cagr = cagr_from_prices(df, PERIODS_PER_YEAR)
         vol = volatility(returns, PERIODS_PER_YEAR)

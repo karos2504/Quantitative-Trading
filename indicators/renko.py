@@ -70,7 +70,7 @@ def convert_to_renko(df, atr_period=120):
 
 
 if __name__ == '__main__':
-    from utils.data import fetch_ohlcv_data
+    from data_ingestion.data import fetch_ohlcv_data
 
     tickers = ['AAPL']
     data = fetch_ohlcv_data(tickers, period='1mo', interval='5m')

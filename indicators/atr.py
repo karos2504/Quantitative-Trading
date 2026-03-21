@@ -34,7 +34,7 @@ def calculate_atr(df, period=14):
 
 
 if __name__ == '__main__':
-    from utils.data import fetch_ohlcv_data
+    from data_ingestion.data import fetch_ohlcv_data
 
     tickers = ['AAPL', 'MSFT', 'GOOG']
     data = fetch_ohlcv_data(tickers, period='1mo', interval='5m')

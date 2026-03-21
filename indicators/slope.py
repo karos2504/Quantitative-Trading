@@ -44,14 +44,14 @@ def calculate_slope(series, n):
 if __name__ == '__main__':
     import datetime as dt
     import matplotlib.pyplot as plt
-    from utils.data import fetch_ohlcv_data
+    from data_ingestion.data import fetch_ohlcv_data
 
     start = dt.datetime.today() - dt.timedelta(days=365)
     end = dt.datetime.today()
     data = fetch_ohlcv_data(['AAPL'], start=start, end=end)
 
-    df = data['AAPL'][['Adj Close']].copy()
-    df['Slope'] = calculate_slope(df['Adj Close'], n=5)
+    df = data['AAPL'][['Close']].copy()
+    df['Slope'] = calculate_slope(df['Close'], n=5)
 
     plt.figure(figsize=(10, 6))
     plt.plot(df.index, df['Slope'], label='Slope Angle', color='b')

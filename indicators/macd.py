@@ -6,7 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 import matplotlib.pyplot as plt
-from utils.data import fetch_ohlcv_data
+from data_ingestion.data import fetch_ohlcv_data
 
 
 def calculate_macd(df, fast=12, slow=26, signal=9):

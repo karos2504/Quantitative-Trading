@@ -55,7 +55,7 @@ def calculate_vwap(df, session_col=None):
 
 
 if __name__ == '__main__':
-    from utils.data import fetch_ohlcv_data
+    from data_ingestion.data import fetch_ohlcv_data
 
     data = fetch_ohlcv_data(['AAPL'], period='5d', interval='1h')
     df = calculate_vwap(data['AAPL'])

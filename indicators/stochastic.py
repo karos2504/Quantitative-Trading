@@ -40,7 +40,7 @@ def calculate_stochastic(df, k_period=14, d_period=3, smooth_k=3):
 
 
 if __name__ == '__main__':
-    from utils.data import fetch_ohlcv_data
+    from data_ingestion.data import fetch_ohlcv_data
 
     data = fetch_ohlcv_data(['AAPL'], period='1mo', interval='1h')
     df = calculate_stochastic(data['AAPL'])
