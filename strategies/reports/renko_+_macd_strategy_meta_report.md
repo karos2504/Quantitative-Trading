@@ -1,4 +1,4 @@
-# Backtest Report: renko_+_macd_strategy_v6.0_meta_report
+# Backtest Report: renko_+_macd_strategy_meta_report
 
 ## 📊 Performance Summary
 | Metric | Value |
@@ -43,9 +43,9 @@
 - **Information Ratio:** -0.2852
 
 ## 🎲 Monte Carlo Analysis
-- **P-value (Return):** 0.4720
-- **P-value (Sharpe):** 0.4640
-- **P-value (vs Random):** 0.4600
+- **P-value (Return):** 0.4460
+- **P-value (Sharpe):** 0.4560
+- **P-value (vs Random):** 0.3820
 
 ## 🔄 Sub-period Analysis
 | Window | Period | Return | Sharpe | Max DD |
@@ -58,12 +58,12 @@
 ## 🔥 Stress Test Performance
 | Scenario | Stressed Return | Max DD | Status |
 | :--- | :--- | :--- | :--- |
-| Global Financial Crisis 2008 | -80.84% | -91.07% | Survived |
-| COVID-19 Crash 2020 | -29.94% | -69.72% | Survived |
-| Dot-com Bubble Burst 2000–2002 | 53.51% | -51.88% | Survived |
-| Black Monday 1987 | 43.80% | -28.61% | Survived |
-| Russian Default / LTCM 1998 | 29.50% | -33.80% | Survived |
-| Crypto Bear Market 2022 | -80.04% | -91.42% | Survived |
+| Global Financial Crisis 2008 | -70.32% | -86.80% | Survived |
+| COVID-19 Crash 2020 | 11.21% | -43.15% | Survived |
+| Dot-com Bubble Burst 2000–2002 | -53.40% | -82.39% | Survived |
+| Black Monday 1987 | 46.92% | -28.61% | Survived |
+| Russian Default / LTCM 1998 | 21.51% | -34.46% | Survived |
+| Crypto Bear Market 2022 | 23.51% | -66.19% | Survived |
 
 ## 🏦 Trade-Level Analysis
 - **Total Trades:** 19

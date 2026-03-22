@@ -52,7 +52,7 @@ class FillEvent(Event):
         self.commission = commission if commission is not None else self._calculate_commission()
 
     def _calculate_commission(self):
-        return max(1.0, self.quantity * 0.005) # Interactive Brokers style fallback
+        return max(1.0, self.quantity * 0.005)
 
 # =============================================================================
 # DATA HANDLER
@@ -93,7 +93,6 @@ class HistoricCSVDataHandler(DataHandler):
         for symbol in self.symbol_data.keys():
             try:
                 bar = next(self.symbol_data_generator[symbol])
-                # Convert the tuple (index, pd.Series) into a dict for easy access
                 bar_dict = bar[1].to_dict()
                 bar_dict['datetime'] = bar[0]
                 bar_dict['symbol'] = symbol

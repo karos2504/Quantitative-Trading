@@ -1,11 +1,11 @@
-# Backtest Report: renko_+_macd_strategy_v6.1_nvda_report
+# Backtest Report: renko_+_macd_strategy_nvda_report
 
 ## 📊 Performance Summary
 | Metric | Value |
 | :--- | :--- |
 | Start | 2023-05-17 13:30:00 |
 | End | 2026-03-20 19:30:00 |
-| Period | 206 days 05:00:00 |
+| Period | 206 days 06:00:00 |
 | Start Value | 100000.0000 |
 | End Value | 201924.9535 |
 | Total Return [%] | 101.9250 |
@@ -27,12 +27,12 @@
 | Avg Losing Trade Duration | 2 days 14:49:24.705882352 |
 | Profit Factor | 1.5946 |
 | Expectancy | 4431.5197 |
-| Sharpe Ratio | 1.9463 |
-| Calmar Ratio | 5.3714 |
+| Sharpe Ratio | 1.9461 |
+| Calmar Ratio | 5.3695 |
 | Omega Ratio | 1.0995 |
-| Sortino Ratio | 3.0511 |
-| Sortino Ratio | 0.5175 |
-| Calmar Ratio | 0.0793 |
+| Sortino Ratio | 3.0508 |
+| Sortino Ratio | 0.5174 |
+| Calmar Ratio | 0.0792 |
 | CVaR (95%) | -1.91% |
 
 ## 📈 Benchmark Comparison
@@ -43,27 +43,27 @@
 - **Information Ratio:** -0.4944
 
 ## 🎲 Monte Carlo Analysis
-- **P-value (Return):** 0.4780
-- **P-value (Sharpe):** 0.4880
-- **P-value (vs Random):** 0.6620
+- **P-value (Return):** 0.4740
+- **P-value (Sharpe):** 0.5020
+- **P-value (vs Random):** 0.5160
 
 ## 🔄 Sub-period Analysis
 | Window | Period | Return | Sharpe | Max DD |
 | :--- | :--- | :--- | :--- | :--- |
-| 1 | 2023-05-17 → 2024-01-31 | 54.31% | 3.6088 | -21.78% |
-| 2 | 2024-02-01 → 2024-10-15 | 50.87% | 3.8551 | -25.68% |
-| 3 | 2024-10-15 → 2025-07-03 | -6.49% | -0.2223 | -43.48% |
+| 1 | 2023-05-17 → 2024-01-31 | 54.85% | 3.6340 | -21.78% |
+| 2 | 2024-01-31 → 2024-10-15 | 51.23% | 3.8751 | -25.68% |
+| 3 | 2024-10-15 → 2025-07-02 | -8.46% | -0.4211 | -43.48% |
 | 4 | 2025-07-03 → 2026-03-20 | -11.63% | -1.3650 | -23.80% |
 
 ## 🔥 Stress Test Performance
 | Scenario | Stressed Return | Max DD | Status |
 | :--- | :--- | :--- | :--- |
-| Global Financial Crisis 2008 | -67.72% | -88.57% | Survived |
-| COVID-19 Crash 2020 | 106.98% | -45.97% | Survived |
-| Dot-com Bubble Burst 2000–2002 | -61.41% | -84.77% | Survived |
-| Black Monday 1987 | 149.72% | -45.97% | Survived |
-| Russian Default / LTCM 1998 | 239.25% | -45.97% | Survived |
-| Crypto Bear Market 2022 | -83.46% | -94.09% | Survived |
+| Global Financial Crisis 2008 | -66.77% | -88.13% | Survived |
+| COVID-19 Crash 2020 | 20.38% | -50.20% | Survived |
+| Dot-com Bubble Burst 2000–2002 | -20.97% | -81.03% | Survived |
+| Black Monday 1987 | 33.44% | -52.33% | Survived |
+| Russian Default / LTCM 1998 | 129.37% | -45.97% | Survived |
+| Crypto Bear Market 2022 | -66.49% | -91.83% | Survived |
 
 ## 🏦 Trade-Level Analysis
 - **Total Trades:** 23

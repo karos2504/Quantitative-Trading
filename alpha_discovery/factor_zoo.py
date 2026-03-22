@@ -10,7 +10,7 @@ class FactorZoo:
     @staticmethod
     def compute_momentum(prices: pd.Series, lookback: int = 252) -> pd.Series:
         """Standard 12-month trailing price momentum."""
-        return prices.pct_change(lookback)
+        return np.log(prices / prices.shift(lookback))
 
     @staticmethod
     def compute_volatility(returns: pd.Series, lookback: int = 20) -> pd.Series:

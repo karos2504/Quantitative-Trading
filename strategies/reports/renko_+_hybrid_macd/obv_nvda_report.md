@@ -1,4 +1,4 @@
-# Backtest Report: obv_v5.4_nvda_report
+# Backtest Report: obv_nvda_report
 
 ## 📊 Performance Summary
 | Metric | Value |
@@ -43,9 +43,9 @@
 - **Information Ratio:** -0.4174
 
 ## 🎲 Monte Carlo Analysis
-- **P-value (Return):** 0.4560
-- **P-value (Sharpe):** 0.4700
-- **P-value (vs Random):** 0.4160
+- **P-value (Return):** 0.4400
+- **P-value (Sharpe):** 0.4580
+- **P-value (vs Random):** 0.2640
 
 ## 🔄 Sub-period Analysis
 | Window | Period | Return | Sharpe | Max DD |
@@ -58,12 +58,12 @@
 ## 🔥 Stress Test Performance
 | Scenario | Stressed Return | Max DD | Status |
 | :--- | :--- | :--- | :--- |
-| Global Financial Crisis 2008 | 7.86% | -75.17% | Survived |
-| COVID-19 Crash 2020 | 112.94% | -40.03% | Survived |
-| Dot-com Bubble Burst 2000–2002 | 40.34% | -70.67% | Survived |
-| Black Monday 1987 | 183.40% | -37.37% | Survived |
-| Russian Default / LTCM 1998 | 133.90% | -38.19% | Survived |
-| Crypto Bear Market 2022 | -59.56% | -92.71% | Survived |
+| Global Financial Crisis 2008 | 41.26% | -72.95% | Survived |
+| COVID-19 Crash 2020 | 150.68% | -37.37% | Survived |
+| Dot-com Bubble Burst 2000–2002 | 93.32% | -59.44% | Survived |
+| Black Monday 1987 | 118.09% | -37.37% | Survived |
+| Russian Default / LTCM 1998 | 198.61% | -37.37% | Survived |
+| Crypto Bear Market 2022 | -34.54% | -92.75% | Survived |
 
 ## 🏦 Trade-Level Analysis
 - **Total Trades:** 22

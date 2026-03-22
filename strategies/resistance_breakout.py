@@ -1,14 +1,5 @@
 """
-Intraday Resistance Breakout Strategy — Advanced Backtest (v5.1)
-
-Improvements over v5.0:
-  1. ADX FILTER REMOVED — Hourly ADX is too laggy and overlaps with the 
-     EMA trend filters, causing severe signal starvation.
-  2. LOWERED VOLATILITY FLOOR — vol_z_threshold now tests down to 0.0 
-     (anything above average volume) to increase trade frequency.
-  3. LOWERED BREAKOUT HURDLE — atr_breakout_coef tests down to 0.0.
-  4. STRICTER OOS VALIDATION — MIN_TRADES_VALID increased to 5 to ensure 
-     surviving Walk-Forward windows have statistical significance.
+Intraday Resistance Breakout Strategy
 """
 
 import sys
@@ -85,7 +76,7 @@ def _precompute_indicators(df, atr_period=14, roll_period=20,
     return df
 
 # ─────────────────────── STRATEGY CLASS ──────────────────────── #
-class BreakoutStrategyV5_1(Strategy):
+class BreakoutStrategy(Strategy):
     vol_z_threshold    = 0.25
     climax_z_threshold = 3.0
     atr_breakout_coef  = 0.1
@@ -185,7 +176,7 @@ class BreakoutStrategyV5_1(Strategy):
                          tp=close + atr * self.tp_factor)
 
 # ─────────────────── WF STRATEGY VARIANT ─────────────────────── #
-class BreakoutStrategyWF(BreakoutStrategyV5_1):
+class BreakoutStrategyWF(BreakoutStrategy):
     def _vol_size(self, close, atr):
         if close <= 0: return 1
         return max(1, int(self.equity * 0.90 / close))
@@ -213,7 +204,7 @@ from backtesting_engine.walk_forward import run_walk_forward
 # ─────────────────────────── MAIN ────────────────────────────── #
 def main():
     print("=" * 70)
-    print("  Resistance Breakout Strategy — Advanced Backtest (v5.1)")
+    print("  Resistance Breakout Strategy — Advanced Backtest")
     print("=" * 70)
 
     from data_ingestion.data_store import load_universe_data
@@ -227,9 +218,9 @@ def main():
     if not tickers: return
 
     run_strategy_pipeline(
-        strategy_name="Resistance Breakout Strategy v5.1",
+        strategy_name="Resistance Breakout Strategy",
         ohlcv_data=ohlcv,
-        strategy_class=BreakoutStrategyV5_1,
+        strategy_class=BreakoutStrategy,
         default_params=DEFAULT_PARAMS,
         param_grid=PARAM_GRID,
         precompute_fn=_precompute_indicators,
@@ -245,7 +236,7 @@ def main():
     for ticker in tickers:
         try:
             proc = _precompute_indicators(ohlcv[ticker])
-            bt   = Backtest(proc, BreakoutStrategyV5_1, cash=CASH, commission=COMMISSION, trade_on_close=True, finalize_trades=True)
+            bt   = Backtest(proc, BreakoutStrategy, cash=CASH, commission=COMMISSION, trade_on_close=True, finalize_trades=True)
             def _tp_gt_sl(p): return p.tp_factor > p.sl_factor
             opt = bt.optimize(**PARAM_GRID, maximize="Sharpe Ratio", constraint=_tp_gt_sl, return_heatmap=False)
 
@@ -266,7 +257,7 @@ def main():
             print(f"  ⚠️  {ticker}: extraction failed ({e}) — using defaults")
 
     print("\n" + "=" * 70)
-    print("  Walk-Forward Out-of-Sample Validation (v5.1)")
+    print("  Walk-Forward Out-of-Sample Validation")
     wf_results = {}
     for ticker in tickers:
         wf_results[ticker] = run_walk_forward(ticker, ohlcv[ticker], BreakoutStrategyWF, best_params_map.get(ticker, DEFAULT_PARAMS), precompute_fn=_precompute_indicators, min_trades_valid=MIN_TRADES_VALID)

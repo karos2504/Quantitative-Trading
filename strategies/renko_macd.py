@@ -1,14 +1,5 @@
 """
-Renko + MACD Strategy — v6.1 (Institutional Math & Advanced Exits)
-
-Upgrades vs v6.0:
-═════════════════
-Layer 3 (Exits) completely overhauled:
-  • Dynamic Time-Decay: Stop loss systematically tightens (1.0x -> 0.5x -> 0.25x ATR) 
-    the longer a trade sits without hitting its target, choking out stalled momentum.
-  • True Chandelier Exit: High-watermark now anchors to the absolute High/Low of the 
-    bar, rather than the Close, preventing intra-bar spikes from eating profits.
-  • Hard Time Stop: Forces a close at 1.5x time limit if unrealized R is < 0.5.
+Renko + MACD Strategy
 """
 
 import numpy as np
@@ -128,7 +119,7 @@ def _bull_score(row, er_th):
 
 # ─────────────────────── STRATEGY CLASS ──────────────────────── #
 
-class RenkoMACDStrategyV6_1(Strategy):
+class RenkoMACDStrategy(Strategy):
     score_threshold: int   = 4      
     er_th:           float = 0.3    
     tp_atr:          float = 3.5    
@@ -204,7 +195,7 @@ class RenkoMACDStrategyV6_1(Strategy):
                 self.sell(size=sz, sl=close + atr * self.sl_atr, tp=close - atr * self.tp_atr)
                 self._reset_trade_state()
 
-        # ── LAYER 3: V6.1 Advanced Exit Protocol ────────────────
+        # ── LAYER 3: Advanced Exit Protocol ────────────────
         elif self.position.is_long:
             bars_held = bar_idx - self._trade_open_bar
             current_high = self.data.High[-1]
@@ -305,7 +296,7 @@ def _generate_vbt_signals(df, score_threshold=4, er_th=0.3, **_):
 
 # ──────────────── WALK-FORWARD STRATEGY VARIANT ─────────────────── #
 
-class RenkoMACDStrategyWF(RenkoMACDStrategyV6_1):
+class RenkoMACDStrategyWF(RenkoMACDStrategy):
     def _vol_size(self, close, atr):
         if close <= 0: return 1
         return max(1, int(self.equity * 0.90 / close))
@@ -316,7 +307,7 @@ from backtesting_engine.walk_forward import run_walk_forward
 
 def main():
     print("=" * 70)
-    print("  Renko + MACD Strategy — v6.1 (Institutional Math & Advanced Exits)")
+    print("  Renko + MACD Strategy")
     print("=" * 70)
 
     print(f"\n--- Loading {INTERVAL} intraday data from store ---")
@@ -344,9 +335,9 @@ def main():
     def _maximize(stats): return stats["Sharpe Ratio"] if stats["# Trades"] >= 10 else -9999
 
     run_strategy_pipeline(
-        strategy_name="Renko + MACD Strategy v6.1",
+        strategy_name="Renko + MACD Strategy",
         ohlcv_data=precomputed_data, 
-        strategy_class=RenkoMACDStrategyV6_1,
+        strategy_class=RenkoMACDStrategy,
         default_params=DEFAULT_PARAMS,
         param_grid=PARAM_GRID,
         precompute_fn=lambda x: x,  # Dummy function to pass precomputed data through
@@ -367,7 +358,7 @@ def main():
         proc = precomputed_data[ticker]
         extracted = False
         try:
-            bt = Backtest(proc, RenkoMACDStrategyV6_1, cash=CASH, commission=COMMISSION, trade_on_close=True)
+            bt = Backtest(proc, RenkoMACDStrategy, cash=CASH, commission=COMMISSION, trade_on_close=True)
             def _tp_gt_sl_local(p): return p.tp_atr > p.sl_atr
             def _maximize_local(stats): return stats["Sharpe Ratio"] if stats["# Trades"] >= 10 else -9999
 

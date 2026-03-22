@@ -36,9 +36,9 @@ def build_features(df, lookback=20):
     close = df['Close'] if 'Close' in df.columns else df['Close']
 
     # Price returns at multiple horizons
-    feat['ret_1'] = close.pct_change(1)
-    feat['ret_5'] = close.pct_change(5)
-    feat['ret_10'] = close.pct_change(10)
+    feat['ret_1'] = np.log(close / close.shift(1))
+    feat['ret_5'] = np.log(close / close.shift(5))
+    feat['ret_10'] = np.log(close / close.shift(10))
 
     # RSI(14)
     delta = close.diff()

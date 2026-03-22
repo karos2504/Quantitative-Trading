@@ -13,13 +13,6 @@ with 10 validation layers:
   8.  Regime analysis (vol + trend regimes)
   9.  Extended risk metrics (CVaR, Omega, Ulcer Index)
   10. Kelly position sizing
-
-Fixes applied (v4.1):
-  - FutureWarning: infer_objects(copy=False) before fillna
-  - Bin edges must be unique: duplicates='drop' in regime_analysis pd.cut
-  - Profit factor overflow: float('inf') instead of 1e-9 sentinel
-  - Stats printed twice: single self.run() call in full_analysis
-  - Monte Carlo format error: isfinite guard on all printed percentiles
 """
 
 import os
@@ -189,7 +182,7 @@ class VBTBacktester:
         else:
             self.ann_factor = FREQ_ANN_FACTORS.get(freq, 252)
 
-        # --- Look-ahead bias guard (FIX: infer_objects before fillna) ---
+        # --- Look-ahead bias guard ---
         if lag_signals:
             self.entries = (
                 self.entries.shift(1)
@@ -403,7 +396,7 @@ class VBTBacktester:
             sim_dds[i]     = self._calc_max_dd(sampled)
 
         # Random signal baseline
-        close_rets = self.close.pct_change().infer_objects(copy=False).fillna(0).values.flatten()
+        close_rets = np.log(self.close / self.close.shift(1)).infer_objects(copy=False).fillna(0).values.flatten()
         rand_rets  = np.zeros(n_simulations)
         for i in range(n_simulations):
             mask        = np.random.random(n) > 0.5

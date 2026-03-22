@@ -19,7 +19,7 @@ def calculate_obv(df):
     """
     df = df.copy()
     price_col = 'Close' if 'Close' in df.columns else 'Adj Close'
-    returns = df[price_col].pct_change()
+    returns = np.log(df[price_col] / df[price_col].shift(1))
 
     direction = np.where(returns > 0, 1, np.where(returns < 0, -1, 0))
     direction[0] = 0

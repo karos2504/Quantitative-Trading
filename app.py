@@ -12,10 +12,10 @@ SETTINGS_PATH = PROJECT_ROOT / "config" / "settings.py"
 REPORTS_DIR = PROJECT_ROOT / "strategies" / "reports"
 
 STRATEGIES = {
-    "Renko + MACD v6.1": "strategies/renko_macd.py",
-    "Renko Hybrid MACD/OBV v5.4": "strategies/renko_macd_obv.py",
-    "Resistance Breakout v5.1": "strategies/resistance_breakout.py",
-    "Markowitz Portfolio Rebalance v7": "strategies/rebalance_portfolio.py",
+    "Renko + MACD": "strategies/renko_macd.py",
+    "Renko Hybrid MACD/OBV": "strategies/renko_macd_obv.py",
+    "Resistance Breakout": "strategies/resistance_breakout.py",
+    "Markowitz Portfolio Rebalance": "strategies/rebalance_portfolio.py",
 }
 
 def load_settings():

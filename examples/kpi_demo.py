@@ -35,7 +35,7 @@ def main():
             continue
 
         df = data[ticker]
-        returns = df['Close'].pct_change().dropna()
+        returns = np.log(df['Close'] / df['Close'].shift(1)).dropna()
 
         cagr = cagr_from_prices(df, PERIODS_PER_YEAR)
         vol = volatility(returns, PERIODS_PER_YEAR)

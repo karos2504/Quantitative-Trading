@@ -1,10 +1,5 @@
 """
-Renko + MACD + OBV Hybrid Strategy — v5.4
-
-Upgrades vs v5.3:
-  • Integrated OBV Z-score as a +1 "Tie-Breaker" bonus weight.
-  • Retains MACD/Renko as the primary price-action driver.
-  • Drops strict OBV gates to prevent signal starvation.
+Renko + MACD + OBV Hybrid Strategy
 """
 
 import numpy as np
@@ -138,7 +133,7 @@ def _bull_score(row, er_th):
 
 
 # ─────────────────────── STRATEGY CLASS ──────────────────────── #
-class RenkoHybridStrategyV5_4(Strategy):
+class RenkoHybridStrategy(Strategy):
     score_threshold: int   = 5      
     er_th:           float = 0.3    
     adx_th:          float = 20.0   
@@ -195,7 +190,7 @@ class RenkoHybridStrategyV5_4(Strategy):
             "renko_mom": self.renko_mom[-1],
             "hist_slope": self.hist_slope[-1],
             "RSI":       self.rsi[-1],
-            "ER":        er,
+            "ER":        self.er[-1],
             "Stoch_K":   self.stoch_k[-1],
             "Stoch_D":   self.stoch_d[-1],
             "OBV_Z":     self.obv_z[-1],
@@ -209,7 +204,7 @@ class RenkoHybridStrategyV5_4(Strategy):
         bear_entry = (bear_score >= self.score_threshold) and ema_bear
 
         vol_scale = 1.0
-        if real_vol > 0.6: vol_scale = 0.5         
+        if real_vol > 0.6: vol_scale = 0.5
         elif real_vol > 0.4: vol_scale = 0.75
 
         if not self.position:
@@ -264,7 +259,7 @@ class RenkoHybridStrategyV5_4(Strategy):
                 self._reset_trade_state()
 
 
-# ──────────────── VBT SIGNAL GENERATOR (v5.4) ──────────────────── #
+# ──────────────── VBT SIGNAL GENERATOR ──────────────────── #
 def _generate_vbt_signals(df, score_threshold=5, er_th=0.3, adx_th=20, **_):
     renko_mom_bull = df["renko_mom"] > 0.0
     renko_mom_bear = df["renko_mom"] < 0.0
@@ -305,7 +300,7 @@ def _generate_vbt_signals(df, score_threshold=5, er_th=0.3, adx_th=20, **_):
 
 
 # ──────────────── WALK-FORWARD STRATEGY VARIANT ─────────────────── #
-class RenkoHybridStrategyWF(RenkoHybridStrategyV5_4):
+class RenkoHybridStrategyWF(RenkoHybridStrategy):
     def _vol_size(self, close, atr):
         if close <= 0: return 1
         return max(1, int(self.equity * 0.90 / close))
@@ -317,7 +312,7 @@ from backtesting_engine.walk_forward import run_walk_forward
 # ────────────────────────── MAIN ─────────────────────────────── #
 def main():
     print("=" * 70)
-    print("  Renko + MACD + OBV Hybrid Strategy (v5.4)")
+    print("  Renko + MACD + OBV Hybrid Strategy")
     print("=" * 70)
 
     from data_ingestion.data_store import load_universe_data
@@ -336,9 +331,9 @@ def main():
     )
 
     run_strategy_pipeline(
-        strategy_name="Renko + Hybrid MACD/OBV v5.4",
+        strategy_name="Renko + Hybrid MACD/OBV",
         ohlcv_data=ohlc_intraday,
-        strategy_class=RenkoHybridStrategyV5_4,
+        strategy_class=RenkoHybridStrategy,
         default_params=DEFAULT_PARAMS,
         param_grid=PARAM_GRID,
         precompute_fn=_precompute_indicators,
@@ -357,7 +352,7 @@ def main():
         extracted = False
         try:
             proc = _precompute_indicators(df_raw)
-            bt   = Backtest(proc, RenkoHybridStrategyV5_4, cash=CASH, commission=COMMISSION, trade_on_close=True)
+            bt   = Backtest(proc, RenkoHybridStrategy, cash=CASH, commission=COMMISSION, trade_on_close=True)
             
             def _tp_gt_sl_local(p): return p.tp_atr > p.sl_atr
             def _maximize_local(stats):
