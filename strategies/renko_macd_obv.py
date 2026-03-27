@@ -7,7 +7,6 @@ import sys
 import os
 import warnings
 from pathlib import Path
-from datetime import timedelta
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ["PYTHONWARNINGS"] = "ignore:resource_tracker:UserWarning"
@@ -21,7 +20,6 @@ if os.name == "posix":
     except (RuntimeError, ValueError):
         pass
 
-import yfinance as yf
 import pandas as pd
 import backtesting
 backtesting.Pool = multiprocessing.Pool
@@ -31,27 +29,24 @@ from backtesting_engine.strategy_runner import run_strategy_pipeline
 from indicators.renko import convert_to_renko
 from indicators.macd import calculate_macd
 from indicators.obv import calculate_obv
-from indicators.slope import calculate_slope
 from indicators.rsi import calculate_rsi
 from indicators.atr import calculate_atr
 from indicators.stochastic import calculate_stochastic
-from indicators.vwap import calculate_vwap
 from alpha_discovery.strategy_utils import align_indicator_data, standardize_ohlcv
 from core.math_utils import renko_momentum
 
 # ─────────────────────────── CONFIG ─────────────────────────── #
 from config.settings import (
-    TICKERS, CASH, COMMISSION, TARGET_RISK, MIN_TRADES, 
-    WF_TRAIN_MONTHS, WF_TEST_MONTHS, INTERVAL
+    TICKERS, CASH, COMMISSION, TARGET_RISK, INTERVAL
 )
 
 DEFAULT_PARAMS = dict(
-    score_threshold=5,      
-    er_th=0.3,              
-    adx_th=20,              
-    tp_atr=3.5,             
-    sl_atr=2.0,             
-    time_stop_bars=15,      
+    score_threshold=5,
+    er_th=0.3,
+    adx_th=20,
+    tp_atr=3.5,
+    sl_atr=2.0,
+    time_stop_bars=15,
 )
 
 from indicators.adx import calculate_adx
@@ -63,7 +58,7 @@ def _precompute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     merged = calculate_rsi(merged, period=14)
     merged = calculate_atr(merged, period=14)
     merged = calculate_stochastic(merged, k_period=14, d_period=3, smooth_k=3)
-    
+
     # ── HYBRID ADDITION: OBV Z-Score ───────────────────────────
     merged = calculate_obv(merged)
     obv_roc = merged["OBV"].diff(5)
@@ -73,7 +68,7 @@ def _precompute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     merged["renko_mom"] = renko_momentum(merged["bar_num"], halflife=5)
     merged["macd_hist"]  = merged["MACD"] - merged["Signal"]
-    merged["hist_slope"] = merged["macd_hist"].diff(3)          
+    merged["hist_slope"] = merged["macd_hist"].diff(3)
 
     er_period = 14
     change     = merged["Close"].diff(er_period).abs()
@@ -90,7 +85,7 @@ def _precompute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     required = ["MACD", "Signal", "bar_num", "RSI", "ATR", "ER",
                 "Stoch_K", "Stoch_D", "ADX", "EMA200",
                 "EMA200_slope", "renko_mom", "hist_slope", "RealVol", "OBV_Z"]
-    
+
     merged.dropna(subset=required, inplace=True)
     merged.dropna(inplace=True)
     return standardize_ohlcv(merged)
@@ -101,32 +96,33 @@ def _bull_score(row, er_th):
     """
     Returns (bull_score, bear_score).
     Base weight max: 10. Hybrid volume bonus: +1.
+    Two-tier thresholds for renko_mom and RSI match _generate_vbt_signals().
     """
     bull = 0
     bear = 0
 
-    if row["renko_mom"] > 0.1: bull += 2
+    if row["renko_mom"] > 0.1:   bull += 2
     elif row["renko_mom"] > 0.0: bull += 1
-    if row["renko_mom"] < -0.1: bear += 2
+    if row["renko_mom"] < -0.1:  bear += 2
     elif row["renko_mom"] < 0.0: bear += 1
 
     if row["hist_slope"] > 0: bull += 2
     if row["hist_slope"] < 0: bear += 2
 
-    if row["RSI"] > 55: bull += 2
-    elif row["RSI"] > 50: bull += 1
-    if row["RSI"] < 45: bear += 2
-    elif row["RSI"] < 50: bear += 1
+    if row["RSI"] > 55:        bull += 2
+    elif row["RSI"] > 50:      bull += 1
+    if row["RSI"] < 45:        bear += 2
+    elif row["RSI"] < 50:      bear += 1
 
     if row["ER"] > er_th:
         bull += 2
-        bear += 2   
+        bear += 2
 
     if row["Stoch_K"] > row["Stoch_D"]: bull += 2
-    else: bear += 2
+    else:                                bear += 2
 
     # ── HYBRID ADDITION: Volume Bonus ──────────────────────────
-    if row.get("OBV_Z", 0) > 1.0: bull += 1
+    if row.get("OBV_Z", 0) > 1.0:  bull += 1
     elif row.get("OBV_Z", 0) < -1.0: bear += 1
 
     return bull, bear
@@ -134,12 +130,12 @@ def _bull_score(row, er_th):
 
 # ─────────────────────── STRATEGY CLASS ──────────────────────── #
 class RenkoHybridStrategy(Strategy):
-    score_threshold: int   = 5      
-    er_th:           float = 0.3    
-    adx_th:          float = 20.0   
-    tp_atr:          float = 3.5    
-    sl_atr:          float = 2.0    
-    time_stop_bars:  int   = 15     
+    score_threshold: int   = 5
+    er_th:           float = 0.3
+    adx_th:          float = 20.0
+    tp_atr:          float = 3.5
+    sl_atr:          float = 2.0
+    time_stop_bars:  int   = 15
 
     def init(self):
         self.renko_mom  = self.I(lambda: self.data.renko_mom,   name="renko_mom")
@@ -179,21 +175,20 @@ class RenkoHybridStrategy(Strategy):
         adx      = self.adx[-1]
         ema200   = self.ema200[-1]
         ema_slope = self.ema200_slope[-1]
-        er       = self.er[-1]
         real_vol = self.real_vol[-1]
         bar_idx  = len(self.data) - 1
 
         if adx < self.adx_th:
-            return     
+            return
 
         row = {
             "renko_mom": self.renko_mom[-1],
             "hist_slope": self.hist_slope[-1],
-            "RSI":       self.rsi[-1],
-            "ER":        self.er[-1],
-            "Stoch_K":   self.stoch_k[-1],
-            "Stoch_D":   self.stoch_d[-1],
-            "OBV_Z":     self.obv_z[-1],
+            "RSI":        self.rsi[-1],
+            "ER":         self.er[-1],
+            "Stoch_K":    self.stoch_k[-1],
+            "Stoch_D":    self.stoch_d[-1],
+            "OBV_Z":      self.obv_z[-1],
         }
         bull_score, bear_score = _bull_score(row, self.er_th)
 
@@ -204,7 +199,7 @@ class RenkoHybridStrategy(Strategy):
         bear_entry = (bear_score >= self.score_threshold) and ema_bear
 
         vol_scale = 1.0
-        if real_vol > 0.6: vol_scale = 0.5
+        if real_vol > 0.6:   vol_scale = 0.50
         elif real_vol > 0.4: vol_scale = 0.75
 
         if not self.position:
@@ -220,8 +215,9 @@ class RenkoHybridStrategy(Strategy):
 
         elif self.position.is_long:
             bars_held = bar_idx - self._trade_open_bar
-            if close > self._long_hwm:
-                self._long_hwm = close
+            current_high = self.data.High[-1]
+            if current_high > self._long_hwm:
+                self._long_hwm = current_high
                 new_trail = self._long_hwm - atr * self.sl_atr
                 for trade in self.trades:
                     if trade.is_long and (trade.sl is None or new_trail > trade.sl):
@@ -240,6 +236,7 @@ class RenkoHybridStrategy(Strategy):
 
         elif self.position.is_short:
             bars_held = bar_idx - self._trade_open_bar
+
             if close < self._short_hwm:
                 self._short_hwm = close
                 new_trail = self._short_hwm + atr * self.sl_atr
@@ -261,37 +258,51 @@ class RenkoHybridStrategy(Strategy):
 
 # ──────────────── VBT SIGNAL GENERATOR ──────────────────── #
 def _generate_vbt_signals(df, score_threshold=5, er_th=0.3, adx_th=20, **_):
-    renko_mom_bull = df["renko_mom"] > 0.0
-    renko_mom_bear = df["renko_mom"] < 0.0
-    hist_bull      = df["hist_slope"] > 0
-    hist_bear      = df["hist_slope"] < 0
-    rsi_bull       = df["RSI"] > 50
-    rsi_bear       = df["RSI"] < 50
-    er_ok          = df["ER"] > er_th
-    stoch_bull     = df["Stoch_K"] > df["Stoch_D"]
-    stoch_bear     = df["Stoch_K"] < df["Stoch_D"]
-    obv_bull       = df["OBV_Z"] > 1.0
-    obv_bear       = df["OBV_Z"] < -1.0
-    
-    adx_ok         = df["ADX"] > adx_th
-    ema_bull       = (df["Close"] > df["EMA200"]) & (df["EMA200_slope"] > 0)
-    ema_bear       = (df["Close"] < df["EMA200"]) & (df["EMA200_slope"] < 0)
+    # Renko momentum — two tiers
+    renko_bull_strong = df["renko_mom"] > 0.1
+    renko_bull_weak   = (df["renko_mom"] > 0.0) & ~renko_bull_strong
+    renko_bear_strong = df["renko_mom"] < -0.1
+    renko_bear_weak   = (df["renko_mom"] < 0.0) & ~renko_bear_strong
+
+    # MACD histogram slope
+    hist_bull = df["hist_slope"] > 0
+    hist_bear = df["hist_slope"] < 0
+
+    # RSI — two tiers
+    rsi_bull_strong = df["RSI"] > 55
+    rsi_bull_weak   = (df["RSI"] > 50) & ~rsi_bull_strong
+    rsi_bear_strong = df["RSI"] < 45
+    rsi_bear_weak   = (df["RSI"] < 50) & ~rsi_bear_strong
+
+    er_ok    = df["ER"] > er_th
+    stoch_bull = df["Stoch_K"] > df["Stoch_D"]
+    stoch_bear = df["Stoch_K"] < df["Stoch_D"]
+    obv_bull   = df["OBV_Z"] > 1.0
+    obv_bear   = df["OBV_Z"] < -1.0
+
+    adx_ok   = df["ADX"] > adx_th
+    ema_bull = (df["Close"] > df["EMA200"]) & (df["EMA200_slope"] > 0)
+    ema_bear = (df["Close"] < df["EMA200"]) & (df["EMA200_slope"] < 0)
 
     bull_score = (
-        renko_mom_bull.astype(int) * 2 +
-        hist_bull.astype(int)      * 2 +
-        rsi_bull.astype(int)       * 2 +
-        er_ok.astype(int)          * 2 +
-        stoch_bull.astype(int)     * 2 +
-        obv_bull.astype(int)       * 1
+        renko_bull_strong.astype(int) * 2 +
+        renko_bull_weak.astype(int)   * 1 +
+        hist_bull.astype(int)         * 2 +
+        rsi_bull_strong.astype(int)   * 2 +
+        rsi_bull_weak.astype(int)     * 1 +
+        er_ok.astype(int)             * 2 +
+        stoch_bull.astype(int)        * 2 +
+        obv_bull.astype(int)          * 1
     )
     bear_score = (
-        renko_mom_bear.astype(int) * 2 +
-        hist_bear.astype(int)      * 2 +
-        rsi_bear.astype(int)       * 2 +
-        er_ok.astype(int)          * 2 +
-        stoch_bear.astype(int)     * 2 +
-        obv_bear.astype(int)       * 1
+        renko_bear_strong.astype(int) * 2 +
+        renko_bear_weak.astype(int)   * 1 +
+        hist_bear.astype(int)         * 2 +
+        rsi_bear_strong.astype(int)   * 2 +
+        rsi_bear_weak.astype(int)     * 1 +
+        er_ok.astype(int)             * 2 +
+        stoch_bear.astype(int)        * 2 +
+        obv_bear.astype(int)          * 1
     )
 
     entries = adx_ok & ema_bull & (bull_score >= score_threshold)
@@ -341,19 +352,19 @@ def main():
         cash=CASH,
         commission=COMMISSION,
         freq=INTERVAL,
+        verbose=True,
     )
 
     print("\n" + "=" * 70)
     print("  Extracting per-ticker best params for walk-forward …")
-    
+
     best_params_map = {}
     for ticker in tickers:
         df_raw = ohlc_intraday[ticker]
-        extracted = False
         try:
             proc = _precompute_indicators(df_raw)
             bt   = Backtest(proc, RenkoHybridStrategy, cash=CASH, commission=COMMISSION, trade_on_close=True)
-            
+
             def _tp_gt_sl_local(p): return p.tp_atr > p.sl_atr
             def _maximize_local(stats):
                 if stats["# Trades"] < 10: return -9999
@@ -371,7 +382,6 @@ def main():
 
             if errors: raise KeyError(f"params missing: {errors}")
             best_params_map[ticker] = bp
-            extracted = True
             print(f"  ✅ {ticker}: {bp}")
 
         except Exception as e:
@@ -396,4 +406,3 @@ if __name__ == "__main__":
             get_reusable_executor().shutdown(wait=True)
         except (ImportError, AttributeError):
             pass
-        

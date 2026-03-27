@@ -1,8 +1,5 @@
 """
-Advanced Backtesting Engine — vectorbt + Monte Carlo + Walk-Forward + Stress Testing
-
-Provides the VBTBacktester class that wraps vectorbt's Portfolio.from_signals
-with 10 validation layers:
+Advanced Backtesting Engine
   1.  Base backtest (vectorbt)
   2.  Benchmark comparison (alpha, beta, information ratio)
   3.  Monte Carlo simulation (block bootstrap + random baseline)
@@ -23,6 +20,7 @@ import numpy as np
 import pandas as pd
 import vectorbt as vbt
 from scipy import stats as scipy_stats
+from portfolio_construction import kpi
 
 # Suppress loky semaphore leak warnings on Python 3.14 (cosmetic only)
 warnings.filterwarnings(
@@ -55,6 +53,9 @@ FREQ_ANN_FACTORS = {
     'D':     252,
     'W':     52,
     'M':     12,
+    '1mo':   12,
+    '30D':   12,
+    '31D':   12,
     '1H':    252 * 6.5,
     '2H':    252 * 6.5 / 2,
     '4H':    252 * 6.5 / 4,
@@ -142,8 +143,8 @@ class VBTBacktester:
     def __init__(
         self,
         close,
-        entries,
-        exits,
+        entries=None,
+        exits=None,
         freq='D',
         init_cash=100_000,
         commission=0.001,
@@ -153,27 +154,29 @@ class VBTBacktester:
     ):
         """
         Args:
-            close:        pd.Series of close prices (DatetimeIndex).
-            entries:      pd.Series of boolean entry signals.
-            exits:        pd.Series of boolean exit signals.
+            close:        pd.Series or pd.DataFrame of close prices.
+            entries:      pd.Series of signals (optional).
+            exits:        pd.Series of signals (optional).
             freq:         Data frequency string ('D', '1H', '5T', etc.).
             init_cash:    Starting capital.
             commission:   Commission rate per trade (e.g. 0.001 = 0.1%).
             slippage:     Slippage rate per trade.
             lag_signals:  Shift signals 1 bar forward to prevent look-ahead bias.
+                          Standard for this project (next bar open).
             crypto_24_7:  Use 365-day calendar for annualisation.
         """
         def _squeeze(x):
             return x.squeeze() if isinstance(x, pd.DataFrame) else x
 
         self.close   = _squeeze(close).astype(float)
-        self.entries = _squeeze(entries).astype(bool)
-        self.exits   = _squeeze(exits).astype(bool)
+        self.entries = _squeeze(entries).astype(bool) if entries is not None else None
+        self.exits   = _squeeze(exits).astype(bool) if exits is not None else None
         self.freq       = freq
         self.init_cash  = init_cash
         self.commission = commission
         self.slippage   = slippage
         self.crypto_24_7 = crypto_24_7
+        self.weights     = None # Store target weights for WF analysis
 
         # --- Resolve annualisation factor ---
         if crypto_24_7:
@@ -184,18 +187,20 @@ class VBTBacktester:
 
         # --- Look-ahead bias guard ---
         if lag_signals:
-            self.entries = (
-                self.entries.shift(1)
-                .infer_objects(copy=False)
-                .fillna(False)
-                .astype(bool)
-            )
-            self.exits = (
-                self.exits.shift(1)
-                .infer_objects(copy=False)
-                .fillna(False)
-                .astype(bool)
-            )
+            if self.entries is not None:
+                self.entries = (
+                    self.entries.shift(1)
+                    .infer_objects(copy=False)
+                    .fillna(False)
+                    .astype(bool)
+                )
+            if self.exits is not None:
+                self.exits = (
+                    self.exits.shift(1)
+                    .infer_objects(copy=False)
+                    .fillna(False)
+                    .astype(bool)
+                )
 
         self._portfolio = None
         self._returns   = None
@@ -229,26 +234,70 @@ class VBTBacktester:
             slippage=self.slippage,
             freq=self.freq,
         )
+        return self._post_run(print_stats)
+
+    def run_from_weights(self, weights, print_stats=True):
+        """
+        Run vectorbt backtest using a DataFrame of target weights.
+        Args:
+            weights: pd.DataFrame of target weights (0.0 to 1.0).
+        """
+        # Ensure both are DataFrames for multi-asset
+        close = self.close.to_frame() if isinstance(self.close, pd.Series) else self.close
+        
+        # Align columns first (only use assets present in both)
+        common_assets = close.columns.intersection(weights.columns)
+        if common_assets.empty:
+            # Fallback: if weights columns don't match close, maybe it's a single asset?
+            if isinstance(self.close, pd.Series) or self.close.shape[1] == 1:
+                weights_aligned = weights.reindex(close.index).fillna(0)
+            else:
+                raise ValueError("No common tickers found between weights and close price matrix.")
+        else:
+            close = close[common_assets].astype(float)
+            weights_aligned = weights[common_assets].reindex(close.index).fillna(0.0).astype(float)
+        
+        self.weights = weights_aligned 
+        self.close = close # Ensure prices and weights share identical structure for sub-period slicing
+        
+        self._portfolio = vbt.Portfolio.from_orders(
+            close=close,
+            size=weights_aligned,
+            size_type='target_percent',
+            init_cash=self.init_cash,
+            fees=self.commission,
+            slippage=self.slippage,
+            freq=self.freq,
+            cash_sharing=True,
+            group_by=True, # Enable grouping for portfolio-level stats
+        )
+        return self._post_run(print_stats)
+
+    def _post_run(self, print_stats=True):
+        """Common post-processing after portfolio construction."""
         self._returns = self._portfolio.returns()
-
         stats = self._portfolio.stats()
-        rets  = self._returns.values.flatten()
+        
+        # Aggregate returns for portfolio-level metrics
+        total_returns = self._portfolio.returns()
+        if isinstance(total_returns, pd.DataFrame) and total_returns.columns.size > 1:
+            total_returns = self._portfolio.returns(group_by=True)
+            
+        rets = total_returns.values.flatten()
+        # KPIs
+        sortino = kpi.sortino_ratio(total_returns, risk_free_rate=0, periods_per_year=self.ann_factor)
+        
+        # Safely get scalars for aggregate metrics
+        def _get_scalar(x):
+            if isinstance(x, (pd.Series, pd.DataFrame)):
+                return float(x.iloc[0]) if x.size > 0 else 0.0
+            return float(x)
 
-        # Sortino
-        downside     = np.where(rets < 0, rets, 0.0)
-        downside_std = np.sqrt(np.mean(downside ** 2)) * np.sqrt(self.ann_factor)
-        sortino      = (np.mean(rets) * self.ann_factor) / downside_std \
-                       if downside_std > 0 else 0.0
+        max_dd    = _get_scalar(self._portfolio.max_drawdown(group_by=True))
+        total_ret = _get_scalar(self._portfolio.total_return(group_by=True))
+        cagr      = kpi.cagr_from_returns(total_returns, periods_per_year=self.ann_factor)
+        calmar    = kpi.calmar_ratio(total_returns, periods_per_year=self.ann_factor)
 
-        # Calmar
-        max_dd    = float(self._portfolio.max_drawdown())
-        total_ret = float(self._portfolio.total_return())
-        years     = len(rets) / max(self.ann_factor, 1)
-        cagr      = (1 + total_ret) ** (1 / max(years, 0.01)) - 1 \
-                    if total_ret > -1 else -1.0
-        calmar    = cagr / abs(max_dd) if abs(max_dd) > 0 else 0.0
-
-        # CVaR
         cvar_95 = self._cvar(rets, alpha=0.05)
         cvar_99 = self._cvar(rets, alpha=0.01)
 
@@ -256,15 +305,13 @@ class VBTBacktester:
             print("\n" + "=" * 60)
             print("  📊 vectorbt Portfolio Stats")
             print("=" * 60)
-            # Replace non-finite floats with readable placeholder
             clean_stats = stats.copy()
-            for idx in clean_stats.index:
-                val = clean_stats[idx]
-                if isinstance(val, float) and not np.isfinite(val):
-                    clean_stats[idx] = "N/A (Open Only)"
+            if not isinstance(clean_stats, pd.DataFrame):
+                for idx in clean_stats.index:
+                    val = clean_stats[idx]
+                    if isinstance(val, (float, np.float64)) and not np.isfinite(val):
+                        clean_stats[idx] = "N/A"
             print(clean_stats.to_string())
-            print(f"\n  Sortino Ratio:      {sortino:.4f}")
-            print(f"  Calmar Ratio:       {calmar:.4f}")
             print(f"  CVaR (95%):         {cvar_95 * 100:.4f}%")
             print(f"  CVaR (99%):         {cvar_99 * 100:.4f}%")
             print(f"  Ann. Factor used:   {self.ann_factor}")
@@ -274,32 +321,45 @@ class VBTBacktester:
             'stats':        stats,
             'total_return': total_ret,
             'cagr':         cagr,
-            'sharpe':       self._portfolio.sharpe_ratio(),
+            'sharpe':       _get_scalar(self._portfolio.sharpe_ratio(group_by=True)),
             'sortino':      sortino,
             'calmar':       calmar,
             'max_drawdown': max_dd,
             'cvar_95':      cvar_95,
             'cvar_99':      cvar_99,
-            'returns':      self._returns,
+            'returns':      total_returns,
         }
 
     # =========================================================================
     # 2. BENCHMARK COMPARISON
     # =========================================================================
-    def vs_benchmark(self, print_report=True):
+    def vs_benchmark(self, benchmark_series=None, print_report=True):
         """Compare strategy vs buy-and-hold. Returns alpha, beta, info ratio."""
         if self._returns is None:
             self.run(print_stats=False)
 
-        bh = vbt.Portfolio.from_holding(
-            self.close,
-            init_cash=self.init_cash,
-            fees=self.commission,
-            freq=self.freq,
-        )
-        bh_rets = bh.returns().values.flatten()
-        st_rets = self._returns.values.flatten()
+        if benchmark_series is not None:
+            # Align and shift benchmark to match portfolio returns (execution on T+1 open)
+            bh_rets_se = benchmark_series.pct_change().reindex(self._returns.index).fillna(0)
+            bh_rets = bh_rets_se.values.flatten()
+            bh_total_ret = float(np.cumprod(1 + bh_rets)[-1] - 1)
+            bh_sharpe = self._calc_sharpe(bh_rets)
+        else:
+            benchmark_close = self.close
+            if isinstance(self.close, pd.DataFrame):
+                benchmark_close = self.close.iloc[:, 0] # Fallback to first asset
+                
+            bh = vbt.Portfolio.from_holding(
+                benchmark_close,
+                init_cash=self.init_cash,
+                fees=self.commission,
+                freq=self.freq,
+            )
+            bh_rets = bh.returns().values.flatten()
+            bh_total_ret = float(bh.total_return())
+            bh_sharpe = float(bh.sharpe_ratio())
 
+        st_rets = self._returns.values.flatten()
         n       = min(len(bh_rets), len(st_rets))
         bh_rets = bh_rets[:n]
         st_rets = st_rets[:n]
@@ -321,12 +381,11 @@ class VBTBacktester:
         else:
             corr = float(np.corrcoef(st_rets, bh_rets)[0, 1])
 
-        bh_sharpe = float(bh.sharpe_ratio())
-        st_sharpe = float(self._portfolio.sharpe_ratio())
+        st_sharpe = float(self._portfolio.sharpe_ratio(group_by=True))
 
         result = {
-            'strategy_return':   float(self._portfolio.total_return()),
-            'benchmark_return':  float(bh.total_return()),
+            'strategy_return':   float(self._portfolio.total_return(group_by=True)),
+            'benchmark_return':  bh_total_ret,
             'strategy_sharpe':   st_sharpe,
             'benchmark_sharpe':  bh_sharpe,
             'alpha':             alpha,
@@ -341,7 +400,7 @@ class VBTBacktester:
             print("  📈 Benchmark Comparison (vs Buy-and-Hold)")
             print("=" * 60)
             print(f"  Strategy Return:       {result['strategy_return'] * 100:>8.2f}%")
-            print(f"  Benchmark Return:      {result['benchmark_return'] * 100:>8.2f}%")
+            print(f"  Benchmark Return:      {bh_total_ret * 100:>8.2f}%")
             print(f"  Strategy Sharpe:       {st_sharpe:>8.4f}")
             print(f"  Benchmark Sharpe:      {bh_sharpe:>8.4f}")
             print(f"  Alpha (ann.):          {alpha:>8.4f}")
@@ -396,11 +455,11 @@ class VBTBacktester:
             sim_dds[i]     = self._calc_max_dd(sampled)
 
         # Random signal baseline
-        close_rets = np.log(self.close / self.close.shift(1)).infer_objects(copy=False).fillna(0).values.flatten()
+        close_rets = self.close.pct_change().fillna(0).values.flatten()
         rand_rets  = np.zeros(n_simulations)
         for i in range(n_simulations):
-            mask        = np.random.random(n) > 0.5
-            rand_path   = np.where(mask, close_rets[:n], 0.0)
+            mask         = np.random.random(n) > 0.5
+            rand_path    = np.where(mask, close_rets[:n], 0.0)
             rand_rets[i] = np.cumprod(1 + rand_path)[-1] - 1
 
         pctiles      = [5, 25, 50, 75, 95]
@@ -432,7 +491,6 @@ class VBTBacktester:
             print(f"  Actual Sharpe Ratio:      {actual_sr:>8.4f}")
             print(f"  Actual Max Drawdown:      {actual_dd * 100:>8.2f}%")
 
-            # FIX: guard isfinite before every format call
             def _fmt_pct(v):
                 return f"{v * 100:>8.2f}%" if np.isfinite(v) else "     N/A"
 
@@ -450,9 +508,9 @@ class VBTBacktester:
                     print(f"    {p:>3}th: {fmt_fn(v)}")
 
             print(f"\n  P-value (bootstrap return): {p_ret:.4f}"
-                  f"  {'✅ Robust' if p_ret > 0.25 else '⚠️ Fragile path'}")
+                  f"  {'✅ Top-quartile path' if p_ret < 0.25 else '⚠️ Median or below'}")
             print(f"  P-value (bootstrap Sharpe): {p_sr:.4f}"
-                  f"  {'✅ Robust' if p_sr > 0.25 else '⚠️ Fragile path'}")
+                  f"  {'✅ Top-quartile path' if p_sr < 0.25 else '⚠️ Median or below'}")
             print(f"  P-value (vs random signal): {p_vs_rand:.4f}"
                   f"  {'✅ Beats random' if p_vs_rand < 0.05 else '⚠️ No edge over random'}")
 
@@ -469,6 +527,9 @@ class VBTBacktester:
             mode: 'rolling' — both windows slide forward (default).
                   'anchored' — train always starts from t=0.
         """
+        if mode not in ('rolling', 'anchored'):
+            raise ValueError(f"mode must be 'rolling' or 'anchored', got {mode!r}")
+
         if self._returns is None:
             self.run(print_stats=False)
 
@@ -477,27 +538,40 @@ class VBTBacktester:
         windows     = []
 
         for i in range(n_splits):
-            start    = i * window_size
-            test_end = min((i + 1) * window_size, n)
-
-            sl = slice(start, test_end)
+            test_start = i * window_size
+            test_end   = min((i + 1) * window_size, n)
+            sl = slice(test_start, test_end)
             t_close   = self.close.iloc[sl]
-            t_entries = self.entries.iloc[sl]
-            t_exits   = self.exits.iloc[sl]
+            t_entries = self.entries.iloc[sl] if self.entries is not None else None
+            t_exits   = self.exits.iloc[sl] if self.exits is not None else None
+            t_weights = self.weights.iloc[sl] if self.weights is not None else None
 
             if len(t_close) < 5:
                 continue
 
             try:
-                pf = vbt.Portfolio.from_signals(
-                    close=t_close,
-                    entries=t_entries,
-                    exits=t_exits,
-                    init_cash=self.init_cash,
-                    fees=self.commission,
-                    slippage=self.slippage,
-                    freq=self.freq,
-                )
+                if t_weights is not None:
+                    pf = vbt.Portfolio.from_orders(
+                        close=t_close,
+                        size=t_weights,
+                        size_type='target_percent',
+                        init_cash=self.init_cash,
+                        fees=self.commission,
+                        slippage=self.slippage,
+                        freq=self.freq,
+                        cash_sharing=True,
+                        group_by=True
+                    )
+                else:
+                    pf = vbt.Portfolio.from_signals(
+                        close=t_close,
+                        entries=t_entries,
+                        exits=t_exits,
+                        init_cash=self.init_cash,
+                        fees=self.commission,
+                        slippage=self.slippage,
+                        freq=self.freq,
+                    )
                 sharpe = float(pf.sharpe_ratio())
                 windows.append({
                     'window':       i + 1,
@@ -513,7 +587,7 @@ class VBTBacktester:
 
         if not windows:
             if print_report:
-                print("\n  ⚠️ Walk-Forward: insufficient data for splitting")
+                print("\n  ⚠️ Walk-Forward: no successful splits generated. Check data alignment or frequency.")
             return {'windows': [], 'aggregated': {}}
 
         sharpes = [w['sharpe'] for w in windows]
@@ -588,14 +662,33 @@ class VBTBacktester:
                 continue
                 
             t_close   = self.close.iloc[test_indices]
-            t_entries = self.entries.iloc[test_indices]
-            t_exits   = self.exits.iloc[test_indices]
+            t_entries = self.entries.iloc[test_indices] if self.entries is not None else None
+            t_exits   = self.exits.iloc[test_indices] if self.exits is not None else None
+            t_weights = self.weights.iloc[test_indices] if self.weights is not None else None
             
             try:
-                pf = vbt.Portfolio.from_signals(
-                    close=t_close, entries=t_entries, exits=t_exits,
-                    init_cash=self.init_cash, fees=self.commission, slippage=self.slippage, freq=self.freq
-                )
+                if t_weights is not None:
+                    pf = vbt.Portfolio.from_orders(
+                        close=t_close,
+                        size=t_weights,
+                        size_type='target_percent',
+                        init_cash=self.init_cash,
+                        fees=self.commission,
+                        slippage=self.slippage,
+                        freq=self.freq,
+                        cash_sharing=True,
+                        group_by=True
+                    )
+                else:
+                    pf = vbt.Portfolio.from_signals(
+                        close=t_close,
+                        entries=t_entries,
+                        exits=t_exits,
+                        init_cash=self.init_cash,
+                        fees=self.commission,
+                        slippage=self.slippage,
+                        freq=self.freq,
+                    )
                 sharpe = float(pf.sharpe_ratio())
                 paths.append({
                     'path_id': idx + 1,
@@ -649,7 +742,7 @@ class VBTBacktester:
 
         returns      = self._returns.values.flatten()
         results      = {}
-        period_ratio = max(1, 252 / self.ann_factor)
+        period_ratio = 252 / self.ann_factor
 
         for name, crisis in scenarios.items():
             dur  = max(1, int(crisis['duration_days'] / period_ratio))
@@ -692,62 +785,67 @@ class VBTBacktester:
     # =========================================================================
     # 6. DEFLATED SHARPE RATIO
     # =========================================================================
-    def deflated_sharpe(self, n_trials=1, print_report=True):
+    def deflated_sharpe(self, n_trials=1, risk_free_rate=0.0, print_report=True):
         """
         Deflated Sharpe Ratio per Bailey & López de Prado (2014).
-        Adjusts for multiple-testing bias, skewness, and excess kurtosis.
         """
+
         if self._returns is None:
             self.run(print_stats=False)
 
         returns = self._returns.values.flatten()
-        n       = len(returns)
+        n = len(returns)
 
         if n < 2:
             return {
-                'observed_sharpe': 0.0, 'expected_max_sharpe': 0.0,
-                'p_value': 1.0, 'significant': False,
+                "observed_sharpe": 0.0,
+                "expected_max_sharpe": 0.0,
+                "dsr_statistic": 0.0,
+                "p_value": 1.0,
+                "significant": False,
             }
 
-        period_std = np.std(returns, ddof=1)
-        period_sr  = (np.mean(returns) / period_std) if period_std > 0 else 0.0
+        excess = returns - risk_free_rate
 
-        skew = float(scipy_stats.skew(returns))
-        kurt = float(scipy_stats.kurtosis(returns, fisher=True))
+        mean_ret = np.mean(excess)
+        std_ret = np.std(excess, ddof=1)
 
-        euler_m = 0.5772156649
+        if std_ret <= 1e-12:
+            return {"observed_sharpe": 0.0, "expected_max_sharpe": 0.0,
+                    "dsr_statistic": 0.0, "p_value": 1.0, "significant": False}
+
+        sr = mean_ret / std_ret
+
+        skew = float(scipy_stats.skew(excess, bias=False))
+        kurt = float(scipy_stats.kurtosis(excess, fisher=True, bias=False))
+
+        var_sr = (1 - skew * sr + ((kurt + 2) / 4.0) * sr**2) / (n - 1)
+        sr_std = np.sqrt(max(var_sr, 1e-12))
+
+        # Extreme value correction
         if n_trials > 1:
-            log_t = 2 * np.log(n_trials)
-            z_max = (np.sqrt(log_t) * (1 - euler_m / log_t)
-                     + euler_m / np.sqrt(log_t))
+            log_t = np.log(n_trials)
+            z_max = (
+                np.sqrt(2 * log_t)
+                - (np.log(np.log(n_trials)) + np.log(4 * np.pi))
+                / (2 * np.sqrt(2 * log_t))
+            )
         else:
             z_max = 0.0
 
-        sr_std = np.sqrt(
-            (1 - skew * period_sr + (kurt - 1) / 4 * period_sr ** 2)
-            / max(1, n - 1)
-        )
         expected_max_sr = z_max * sr_std
+        dsr_stat = (sr - expected_max_sr) / sr_std
+        p_value = 1 - scipy_stats.norm.cdf(dsr_stat)
 
-        if sr_std > 0:
-            dsr_stat = (period_sr - expected_max_sr) / sr_std
-            p_value  = 1 - scipy_stats.norm.cdf(dsr_stat)
-        else:
-            dsr_stat = 0.0
-            p_value  = 1.0
-
-        sr_ann     = period_sr * np.sqrt(self.ann_factor)
+        sr_ann = sr * np.sqrt(self.ann_factor)
         sr_max_ann = expected_max_sr * np.sqrt(self.ann_factor)
 
         result = {
-            'observed_sharpe':     sr_ann,
-            'expected_max_sharpe': sr_max_ann,
-            'dsr_statistic':       dsr_stat,
-            'p_value':             p_value,
-            'n_trials':            n_trials,
-            'skewness':            skew,
-            'kurtosis':            kurt,
-            'significant':         p_value < 0.05,
+            "observed_sharpe": float(sr_ann),
+            "expected_max_sharpe": float(sr_max_ann),
+            "dsr_statistic": float(dsr_stat),
+            "p_value": float(p_value),
+            "significant": bool(p_value < 0.05),
         }
 
         if print_report:
@@ -760,8 +858,7 @@ class VBTBacktester:
             print(f"  P-value:               {p_value:>8.4f}")
             print(f"  Skewness:              {skew:>8.4f}")
             print(f"  Excess Kurtosis:       {kurt:>8.4f}")
-            label = "✅ Likely skill" if result['significant'] else "⚠️ Possibly luck"
-            print(f"  Conclusion:            {label}")
+            print(f"  Conclusion:            {'✅ Skill' if p_value < 0.05 else '⚠️ Luck'}")
 
         return result
 
@@ -771,9 +868,6 @@ class VBTBacktester:
     def trade_analysis(self, print_report=True):
         """
         Per-trade statistics: win rate, profit factor, expectancy, holding period.
-
-        FIX: profit factor uses float('inf') when there are zero losses,
-        instead of the old 1e-9 sentinel that caused overflow printing.
         """
         if self._portfolio is None:
             self.run(print_stats=False)
@@ -798,7 +892,6 @@ class VBTBacktester:
         gross_profit = float(winners.sum()) if len(winners) > 0 else 0.0
         gross_loss   = float(abs(losers.sum())) if len(losers) > 0 else 0.0
 
-        # FIX: float('inf') instead of 1e-9 sentinel
         profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else float('inf')
 
         avg_win  = float(winners.mean()) if len(winners) > 0 else 0.0
@@ -830,7 +923,6 @@ class VBTBacktester:
             print("=" * 60)
             print(f"  Total Trades:       {len(pnl)}")
             print(f"  Win Rate:           {win_rate * 100:.2f}%")
-            # FIX: format inf cleanly
             pf_str = (f"{profit_factor:.4f}" if np.isfinite(profit_factor)
                       else "∞ (no losses)")
             print(f"  Profit Factor:      {pf_str}  "
@@ -857,18 +949,16 @@ class VBTBacktester:
 
         FIX: uses duplicates='drop' in pd.cut to handle flat/degenerate vol.
         """
-        if self._returns is None:
-            self.run(print_stats=False)
-
         rets  = self._returns
         close = self.close
+        if isinstance(close, pd.DataFrame):
+            close = close.iloc[:, 0] # Use first asset as proxy for regime analysis
 
         # --- Volatility regimes ---
         rolling_vol = rets.rolling(vol_window).std() * np.sqrt(self.ann_factor)
         q33 = float(rolling_vol.quantile(0.33))
         q67 = float(rolling_vol.quantile(0.67))
 
-        # FIX: deduplicate bin edges before pd.cut
         raw_bins = [-np.inf, q33, q67, np.inf]
         uniq_bins = sorted(set(raw_bins))
 
@@ -1066,25 +1156,48 @@ class VBTBacktester:
     # =========================================================================
     # FULL ANALYSIS (convenience wrapper)
     # =========================================================================
-    def full_analysis(self, n_mc=500, n_wf_splits=4, n_trials=1,
+    def full_analysis(self, benchmark_series=None, n_mc=500, n_wf_splits=4, n_trials=1,
                       wf_mode='rolling', verbose=True):
         """
         Run all 10 analyses in sequence and return combined results dict.
-
-        FIX: single self.run() call — no more double-printed stats.
-        Skips advanced analysis when trade count < 2.
+        If the portfolio is already run, it uses the cached results.
         """
-        # Single authoritative run — result cached in self._portfolio / self._returns
-        base = self.run(print_stats=verbose)
+        # --- Handle existing or new run ---
+        if self._portfolio is None:
+            base = self.run(print_stats=verbose)
+        else:
+            # We already have a portfolio (likely from run_from_weights)
+            # Re-calculate the return-based part of 'base' stats
+            sortino = kpi.sortino_ratio(self._returns, risk_free_rate=0, periods_per_year=self.ann_factor)
+            max_dd  = float(self._portfolio.max_drawdown(group_by=True))
+            total_ret = float(self._portfolio.total_return(group_by=True))
+            cagr    = kpi.cagr_from_returns(self._returns, periods_per_year=self.ann_factor)
+            calmar  = kpi.calmar_ratio(self._returns, periods_per_year=self.ann_factor)
 
-        n_trades = self._portfolio.trades.count()
+            base = {
+                'portfolio':    self._portfolio,
+                'stats':        self._portfolio.stats(),
+                'total_return': total_ret,
+                'cagr':         cagr,
+                'sharpe':       float(self._portfolio.sharpe_ratio(group_by=True)),
+                'sortino':      sortino,
+                'calmar':       calmar,
+                'max_drawdown': max_dd,
+                'returns':      self._returns,
+            }
+
+        # Handle trade counts for grouped portfolios
+        n_trades = self._portfolio.trades.count(group_by=True)
+        if hasattr(n_trades, '__len__') and not isinstance(n_trades, (int, float, np.integer, np.floating)):
+            n_trades = n_trades.iloc[0] if len(n_trades) > 0 else 0
+            
         if n_trades < 2:
             if verbose:
                 print(f"\n  ⚠️  Skipping full VBT analysis: "
                       f"only {n_trades} trade(s) found.")
             return {'base': base}
 
-        bench   = self.vs_benchmark(print_report=verbose)
+        bench   = self.vs_benchmark(benchmark_series=benchmark_series, print_report=verbose)
         mc      = self.monte_carlo(n_simulations=n_mc, print_report=verbose)
         wf      = self.walk_forward(n_splits=n_wf_splits, mode=wf_mode, print_report=verbose)
         st      = self.stress_testing(print_report=verbose)
@@ -1116,7 +1229,9 @@ class VBTBacktester:
             results = self.full_analysis(verbose=False)
 
         import os
-        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        dir_name = os.path.dirname(filepath)
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
 
         with open(filepath, 'w') as f:
             f.write(f"# Backtest Report: {os.path.basename(filepath).replace('.md', '')}\n\n")
@@ -1186,6 +1301,59 @@ class VBTBacktester:
                 f.write(f"- **Profit Factor:** {trades.get('profit_factor', 0):.2f}\n")
                 f.write(f"- **Expectancy:** {trades.get('expectancy', 0):.2f}\n\n")
 
+            # --- Deflated Sharpe Ratio ---
+            dsr = results.get('deflated_sharpe', {})
+            if dsr:
+                f.write("## 🛡️ Deflated Sharpe Ratio\n")
+                f.write(f"- **Observed Sharpe:** {dsr.get('observed_sharpe', 0):.4f}\n")
+                f.write(f"- **Expected Max Sharpe:** {dsr.get('expected_max_sharpe', 0):.4f}\n")
+                f.write(f"- **P-value:** {dsr.get('p_value', 0):.4f}\n")
+                f.write(f"- **Conclusion:** {'Likely Skill' if dsr.get('significant') else 'Possibly Luck'}\n\n")
+
+            # --- Regime Analysis ---
+            regimes = results.get('regime_analysis', {})
+            if regimes:
+                f.write("## 🌡️ Regime-Conditional Performance\n")
+                vol_regimes = regimes.get('volatility_regimes', {})
+                if vol_regimes:
+                    f.write("### Volatility Regimes\n")
+                    f.write("| Regime | Return | Sharpe | Max DD | N |\n")
+                    f.write("| :--- | :--- | :--- | :--- | :--- |\n")
+                    for lbl, s in vol_regimes.items():
+                        f.write(f"| {lbl} | {s['avg_return']:.2f}% | {s['sharpe']:.4f} | {s['max_drawdown']:.2f}% | {s['n_periods']} |\n")
+                    f.write("\n")
+                
+                trend_regimes = regimes.get('trend_regimes', {})
+                if trend_regimes:
+                    f.write("### Trend Regimes\n")
+                    f.write("| Regime | Return | Sharpe | Max DD | N |\n")
+                    f.write("| :--- | :--- | :--- | :--- | :--- |\n")
+                    for lbl, s in trend_regimes.items():
+                        f.write(f"| {lbl} | {s['avg_return']:.2f}% | {s['sharpe']:.4f} | {s['max_drawdown']:.2f}% | {s['n_periods']} |\n")
+                    f.write("\n")
+
+            # --- Extended Risk Metrics ---
+            risk = results.get('risk_metrics', {})
+            if risk:
+                f.write("## ⚖️ Extended Risk Metrics\n")
+                f.write(f"- **Omega Ratio:** {risk.get('omega', 0):.4f}\n")
+                f.write(f"- **Tail Ratio:** {risk.get('tail_ratio', 0):.4f}\n")
+                f.write(f"- **Gain-to-Pain:** {risk.get('g2p_ratio', 0):.4f}\n")
+                f.write(f"- **Ulcer Index:** {risk.get('ulcer_index', 0):.4f}\n\n")
+
+            # --- Kelly Sizing ---
+            kelly = results.get('kelly_sizing', {})
+            if kelly:
+                f.write("## 🎯 Kelly Position Sizing\n")
+                f.write(f"- **Win Rate:** {kelly.get('win_rate', 0)*100:.2f}%\n")
+                f.write(f"- **Win/Loss Ratio:** {kelly.get('win_loss_ratio', 0):.4f}\n")
+                f.write(f"- **Full Kelly:** {kelly.get('full_kelly', 0)*100:.2f}%\n")
+                # Find the fractional kelly key dynamically
+                frac_key = [k for k in kelly.keys() if 'kelly_' in k and 'pct' in k]
+                if frac_key:
+                    f.write(f"- **Fractional Kelly:** {kelly[frac_key[0]]*100:.2f}%\n")
+                f.write("\n")
+
             f.write("---\n*Report generated by VBTBacktester*")
 
     # =========================================================================
@@ -1196,7 +1364,7 @@ class VBTBacktester:
         r = np.array(returns)
         if len(r) < 2 or np.std(r, ddof=1) == 0:
             return 0.0
-        return float(np.mean(r) / np.std(r, ddof=1) * np.sqrt(self.ann_factor))
+        return float(kpi.sharpe_ratio(pd.Series(r), risk_free_rate=0, periods_per_year=self.ann_factor))
 
     def _calc_max_dd(self, returns):
         """Maximum drawdown from a returns array."""

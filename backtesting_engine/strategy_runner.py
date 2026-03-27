@@ -64,7 +64,8 @@ def run_strategy_pipeline(
 
             bt = Backtest(df, strategy_class,
                           cash=cash, commission=commission,
-                          exclusive_orders=True, finalize_trades=True)
+                          exclusive_orders=True, finalize_trades=True,
+                          trade_on_close=False)
 
             params = default_params.copy()
             try:
@@ -161,14 +162,14 @@ def run_strategy_pipeline(
             vbt_results[ticker] = res
             
             # --- ML Signal Enhancement Comparison ---
-            if verbose:
-                try:
-                    from alpha_discovery.ml_signals import run_ml_comparison
-                    # ML filter requires enough data, typically > 200 bars for train/test
-                    if len(df) > 300:
-                        run_ml_comparison(df, entries, exits, ticker, freq=freq)
-                except Exception as ml_err:
-                    print(f"  ⚠️ ML Enhancement skipped: {ml_err}")
+            # if verbose:
+            #     try:
+            #         from alpha_discovery.ml_signals import run_ml_comparison
+            #         # ML filter requires enough data, typically > 200 bars for train/test
+            #         if len(df) > 300:
+            #             run_ml_comparison(df, entries, exits, ticker, freq=freq)
+            #     except Exception as ml_err:
+            #         print(f"  ⚠️ ML Enhancement skipped: {ml_err}")
             
             # Save report to file
             report_name = f"{strategy_name.lower().replace(' ', '_')}_{ticker.lower()}_report.md"

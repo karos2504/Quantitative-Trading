@@ -44,7 +44,7 @@ def run_walk_forward(ticker, df, strategy_class, best_params, precompute_fn=lamb
             if len(proc_test) < 50:
                 raise ValueError("too few test bars")
 
-            bt = Backtest(proc_test, strategy_class, cash=CASH, commission=COMMISSION, trade_on_close=True, finalize_trades=True)
+            bt = Backtest(proc_test, strategy_class, cash=CASH, commission=COMMISSION, trade_on_close=False, finalize_trades=True)
             stats = bt.run(**best_params)
             
             n_t   = int(stats["# Trades"])

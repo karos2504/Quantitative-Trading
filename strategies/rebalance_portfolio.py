@@ -4,9 +4,11 @@ Monthly Portfolio Rebalancing
 
 import sys
 import os
-os.environ['PYTHONWARNINGS'] = 'ignore:resource_tracker:UserWarning'
 import multiprocessing
 from pathlib import Path
+
+# Suppress only the noisy resource-tracker warning from joblib subprocesses
+os.environ['PYTHONWARNINGS'] = 'ignore:resource_tracker:UserWarning'
 
 if os.name == 'posix':
     try:
@@ -17,70 +19,73 @@ if os.name == 'posix':
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import warnings
-warnings.filterwarnings('ignore')
-
 import numpy as np
 import pandas as pd
 import datetime as dt
 import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from collections import defaultdict
 
-from pypfopt import EfficientFrontier, risk_models
-
-from data_ingestion.data import fetch_ohlcv_data
 from backtesting_engine.backtesting import VBTBacktester
 from config.settings import CASH, COMMISSION
+from portfolio_construction import kpi
+from portfolio_construction.weight_allocators import (
+    downside_adjusted_scores,
+    momentum_proportional_weights,
+    risk_parity_momentum_weights,
+    markowitz_weights,
+)
 
 
 # ============================================================
 #  CONFIG
 # ============================================================
-RISK_FREE_RATE      = 0.04
-TARGET_VOL          = 0.20
+RISK_FREE_RATE      = 0.07
+TARGET_VOL          = 0.10
 CANDIDATE_SIZE      = 10
-MIN_WEIGHT          = 0.07
-MAX_WEIGHT          = 0.30
-MAX_SECTOR_W_BULL   = 0.30
-MAX_SECTOR_W_TOP    = 0.30
-MAX_SECTOR_W_BEAR   = 0.20
+MIN_WEIGHT          = 0.05
+MAX_WEIGHT          = 0.15
+MAX_SECTOR_W_BULL   = 0.15
+MAX_SECTOR_W_TOP    = 0.15
+MAX_SECTOR_W_BEAR   = 0.10
 COV_LOOKBACK        = 36
 
 # Momentum
 MOM_6_1_VETO        = 0.00
 
-# Regime dead-band
+# Regime dead-band (200-MA fallback)
 REGIME_BULL_BAND    = 1.05
 REGIME_BEAR_BAND    = 0.95
 
 # Crash protection
 DEFENSIVE_SECTORS   = {'UT', 'CS', 'HC'}
 BEAR_DEF_BOOST      = 1.5
-CRASH_CASH_RATIO    = 0.70
+CRASH_CASH_RATIO    = 0.90
 
 # Peak-drawdown circuit
 DD_REDUCE_THRESH    = -0.12
 DD_RESTORE_THRESH   = -0.06
-DD_EXPOSURE_SCALE   = 0.70
+DD_EXPOSURE_SCALE   = 0.90
 
 # Downside-vol penalty
 DOWNSIDE_VOL_MULT   = 3.0
 
-# Rebalance threshold — skip trade if drift < this and no entry/exit
+# Rebalance threshold — skip trade if max weight drift < this
 REBAL_THRESHOLD     = 0.03
 
 # Fast bear trigger — override regime to bear if SPY fell > this last month
 SPY_CRASH_THRESH    = -0.05
 
-# SPY anchor weight in bull regime
+# SPY anchor weight in bull regime (only applied when SPY momentum > 0)
 SPY_ANCHOR_W        = 0.10
+
+# Minimum absolute weight change to log ADD/TRIM in order book
+ORDER_BOOK_MIN_DELTA = 0.005
 
 TXN_COST_BPS        = 10
 MIN_BACKTEST_MONTHS = 24
 
-START_DATE = dt.datetime.today() - dt.timedelta(days=365 * 13)
+START_DATE = dt.datetime.today() - dt.timedelta(days=365 * 10)
 END_DATE   = dt.datetime.today()
 
 REPORTS_DIR = Path(__file__).parent / "reports"
@@ -101,7 +106,7 @@ UNIVERSE_WITH_SECTORS = {
     "ELV":"HC","HCA":"HC","VRTX":"HC",
     "BRK-B":"FIN","JPM":"FIN","BAC":"FIN","WFC":"FIN","GS":"FIN",
     "MS":"FIN","BLK":"FIN","SCHW":"FIN","AXP":"FIN","CB":"FIN",
-    "MMC":"FIN","TRV":"FIN","PNC":"FIN","USB":"FIN","MET":"FIN",
+    "TRV":"FIN","PNC":"FIN","USB":"FIN","MET":"FIN",
     "PRU":"FIN","ICE":"FIN","CME":"FIN",
     "AMZN":"CD","TSLA":"CD","HD":"CD","MCD":"CD","NKE":"CD",
     "LOW":"CD","SBUX":"CD","TJX":"CD","BKNG":"CD","MAR":"CD",
@@ -121,7 +126,9 @@ UNIVERSE_WITH_SECTORS = {
     "PSA":"RE","SPG":"RE","O":"RE","WELL":"RE",
     "LIN":"MAT","APD":"MAT","SHW":"MAT","FCX":"MAT","NEM":"MAT",
     "NUE":"MAT","VMC":"MAT","MLM":"MAT","PPG":"MAT","ECL":"MAT",
+    "SPY":"OTHER",
 }
+
 SP500_UNIVERSE = list(UNIVERSE_WITH_SECTORS.keys())
 
 SECTOR_COLORS = {
@@ -135,10 +142,23 @@ SECTOR_COLORS = {
 #  HELPERS
 # ============================================================
 def _to_period_index(s: pd.Series) -> pd.Series:
+    """Ensure Series carries a monthly PeriodIndex."""
     if not isinstance(s.index, pd.PeriodIndex):
         s = s.copy()
         s.index = pd.PeriodIndex(s.index, freq='M')
     return s
+
+
+def _extract_close(raw: pd.DataFrame) -> pd.Series:
+    """
+    Safely extract the Close column from a yfinance DataFrame regardless
+    of whether it has a MultiIndex (multi-ticker download) or flat columns.
+    """
+    close = raw["Close"] if not isinstance(raw.columns, pd.MultiIndex) \
+            else raw["Close"].squeeze()
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+    return close
 
 
 # ============================================================
@@ -149,142 +169,105 @@ def build_prices(data: dict) -> pd.DataFrame:
         {t: df['Close'] for t, df in data.items()}
     ).dropna(how='all').ffill(limit=2)
 
+
 def compute_returns(prices: pd.DataFrame) -> pd.DataFrame:
     return np.log(prices / prices.shift(1))
 
+
 def compute_12_1(prices: pd.DataFrame) -> pd.DataFrame:
+    """12-minus-1 month momentum (skips most recent month)."""
     return np.log(prices.shift(1) / prices.shift(13))
 
+
 def compute_6_1(prices: pd.DataFrame) -> pd.DataFrame:
+    """6-minus-1 month momentum."""
     return np.log(prices.shift(1) / prices.shift(7))
 
 
 # ============================================================
 #  RISK METRICS
 # ============================================================
-def _sortino(returns: pd.Series, rf_monthly: float = RISK_FREE_RATE / 12) -> float:
-    excess  = returns - rf_monthly
-    downside = excess[excess < 0]
-    if len(downside) < 3:
-        return np.nan
-    semi_dev = np.sqrt(np.mean(downside ** 2)) * np.sqrt(12)
-    if semi_dev == 0:
-        return np.nan
-    return (excess.mean() * 12) / semi_dev
-
-
-def _calmar(returns: pd.Series) -> float:
-    if len(returns) < 6:
-        return np.nan
-    equity  = (1 + returns).cumprod()
-    peak    = equity.cummax()
-    dd      = (equity - peak) / peak
-    max_dd  = dd.min()
-    if max_dd == 0:
-        return np.nan
-    n_years = len(returns) / 12
-    cagr    = equity.iloc[-1] ** (1 / n_years) - 1
-    return cagr / abs(max_dd)
-
-
-def _information_ratio(strat: pd.Series, bench: pd.Series) -> float:
-    active = strat - bench.reindex(strat.index).fillna(0)
-    if active.std() == 0 or len(active) < 6:
-        return np.nan
-    return (active.mean() * 12) / (active.std() * np.sqrt(12))
-
-
 def compute_full_metrics(strat: pd.Series, bench: pd.Series) -> dict:
-    strat  = strat.dropna()
-    n_mo   = len(strat)
-    n_yrs  = n_mo / 12
+    strat        = strat.dropna()
+    bench_aligned = bench.reindex(strat.index).fillna(0)
 
-    equity  = (1 + strat).cumprod()
-    peak    = equity.cummax()
-    dd      = (equity - peak) / peak
-    max_dd  = dd.min()
+    cagr         = kpi.cagr_from_returns(strat, periods_per_year=12)
+    ann_vol      = kpi.volatility(strat, periods_per_year=12)
+    sharpe       = kpi.sharpe_ratio(strat, risk_free_rate=RISK_FREE_RATE, periods_per_year=12)
+    sortino      = kpi.sortino_ratio(strat, risk_free_rate=RISK_FREE_RATE, periods_per_year=12)
+    max_dd       = kpi.max_drawdown(strat)
+    calmar       = kpi.calmar_ratio(strat, periods_per_year=12)
+    ir           = kpi.information_ratio(strat, bench_aligned, periods_per_year=12)
+    gain_pain    = kpi.gain_pain_ratio(strat)
+    max_recovery = kpi.max_recovery_period(strat)
 
-    cagr    = equity.iloc[-1] ** (1 / n_yrs) - 1 if n_yrs > 0 else np.nan
-    ann_vol = strat.std() * np.sqrt(12)
-    sharpe  = (cagr - RISK_FREE_RATE) / ann_vol if ann_vol > 0 else np.nan
-    sortino = _sortino(strat)
-    calmar  = cagr / abs(max_dd) if max_dd != 0 else np.nan
-
-    bench_a = bench.reindex(strat.index).fillna(0)
-    active  = strat - bench_a
-    te      = active.std() * np.sqrt(12)
-    ir      = (active.mean() * 12) / te if te > 0 else np.nan
-
-    in_dd   = (dd < 0).astype(int)
-    runs    = []
-    count   = 0
-    for v in in_dd:
-        if v:
-            count += 1
-        else:
-            if count:
-                runs.append(count)
-            count = 0
-    if count:
-        runs.append(count)
-    max_recovery = max(runs) if runs else 0
-
-    win_rate  = (strat > 0).mean()
-    avg_win   = strat[strat > 0].mean() if (strat > 0).any() else 0
-    avg_loss  = strat[strat < 0].mean() if (strat < 0).any() else 0
-    gain_pain = avg_win / abs(avg_loss) if avg_loss != 0 else np.nan
+    active = strat - bench_aligned
+    te     = kpi.volatility(active, periods_per_year=12)
 
     return {
-        "CAGR (%)":            round(cagr * 100, 2),
-        "Ann. Vol (%)":        round(ann_vol * 100, 2),
-        "Sharpe":              round(sharpe, 3),
-        "Sortino":             round(sortino, 3),
-        "Calmar":              round(calmar, 3),
-        "Max Drawdown (%)":    round(max_dd * 100, 2),
-        "Max Recovery (mo)":   max_recovery,
-        "Info Ratio vs SPY":   round(ir, 3),
-        "Tracking Error (%)":  round(te * 100, 2),
-        "Win Rate (%)":        round(win_rate * 100, 1),
-        "Gain/Pain":           round(gain_pain, 2),
-        "Months":              n_mo,
+        "CAGR (%)":           round(cagr * 100, 2),
+        "Ann. Vol (%)":       round(ann_vol * 100, 2),
+        "Sharpe":             round(sharpe, 3),
+        "Sortino":            round(sortino, 3),
+        "Calmar":             round(calmar, 3),
+        "Max Drawdown (%)":   round(max_dd * 100, 2),
+        "Max Recovery (mo)":  max_recovery,
+        "Info Ratio vs SPY":  round(ir, 3),
+        "Tracking Error (%)": round(te * 100, 2),
+        "Win Rate (%)":       round((strat > 0).mean() * 100, 1),
+        "Gain/Pain":          round(gain_pain, 2),
+        "Months":             len(strat),
     }
 
 
 # ============================================================
 #  REGIME DETECTION
 # ============================================================
-def _detect_regime(spy_prices_daily: pd.Series):
+def _detect_regime(spy_prices_daily: pd.Series, vix_prices_daily: pd.Series = None) -> pd.Series:
+    """
+    Returns a daily Series of {1 = bull, 0 = neutral, -1 = bear}.
+
+    Primary:  3-state Gaussian HMM (State 0 = low vol = bull, already
+              guaranteed by fit_hmm_regimes ordering).
+    Fallback: 200-MA dead-band (±5%).
+    """
     if spy_prices_daily is None or len(spy_prices_daily) < 220:
         return None
+
+    # ── HMM path ───────────────────────────────────────────────────────
     try:
         from portfolio_construction.regime_hmm import fit_hmm_regimes
-        regime_labels = fit_hmm_regimes(spy_prices_daily, n_components=2)
-        rets  = np.log(spy_prices_daily / spy_prices_daily.shift(1))
-        vol_0 = rets[regime_labels == 0].std()
-        vol_1 = rets[regime_labels == 1].std()
-        bull  = 0 if vol_0 < vol_1 else 1
-        print("  Regime: HMM ✅")
-        return regime_labels.map({bull: 1, 1 - bull: -1})
-    except Exception as e:
-        print(f"  ⚠️  HMM failed ({e}). Using 200-MA dead-band.")
 
-    ma200    = spy_prices_daily.rolling(200).mean()
-    regime   = pd.Series(0, index=spy_prices_daily.index, dtype=int)
-    regime[spy_prices_daily > ma200 * REGIME_BULL_BAND]  =  1
-    regime[spy_prices_daily < ma200 * REGIME_BEAR_BAND]  = -1
-    regime   = regime.replace(0, np.nan).ffill().fillna(1).astype(int)
+        # fit_hmm_regimes guarantees State 0 = lowest-vol regime = bull.
+        regime_labels = fit_hmm_regimes(spy_prices_daily, vix_prices=vix_prices_daily, n_components=3)
+        mapped = regime_labels.map({0: 1, 1: 0, 2: -1})
+        bull_pct = (mapped == 1).mean() * 100
+        print(f"  Regime: HMM ✅  bull {bull_pct:.1f}%  bear {100-bull_pct:.1f}%")
+        return mapped
+
+    except Exception as e:
+        print(f"  ⚠️  HMM failed ({e}). Falling back to 200-MA dead-band.")
+
+    # ── 200-MA dead-band fallback ───────────────────────────────────────
+    ma200  = spy_prices_daily.rolling(200).mean()
+    regime = pd.Series(0, index=spy_prices_daily.index, dtype=int)
+    regime[spy_prices_daily > ma200 * REGIME_BULL_BAND] =  1
+    regime[spy_prices_daily < ma200 * REGIME_BEAR_BAND] = -1
+    # Neutral (0) → forward-fill last known regime, default to bull at start
+    regime = regime.replace(0, np.nan).ffill().fillna(1).astype(int)
+
     bull_pct = (regime == 1).mean() * 100
     print(f"  Regime (200-MA dead-band): bull {bull_pct:.1f}%  bear {100-bull_pct:.1f}%  ✅")
     return regime
 
 
-def _get_regime_state(spy_regime, date) -> int:
+def _get_regime_state(spy_regime: pd.Series | None, date) -> int:
+    """Look up the regime label on or before `date`. Returns 1 (bull) if unknown."""
     if spy_regime is None:
         return 1
-    # Ensure date is Timestamp for lookup in daily spy_regime index
-    lookup_date = date.to_timestamp() if hasattr(date, 'to_timestamp') else date
+    lookup = date.to_timestamp() if hasattr(date, 'to_timestamp') else date
     try:
-        idx = spy_regime.index.get_indexer([lookup_date], method='ffill')[0]
+        idx = spy_regime.index.get_indexer([lookup], method='ffill')[0]
         if idx >= 0:
             return int(spy_regime.iloc[idx])
     except Exception:
@@ -292,124 +275,42 @@ def _get_regime_state(spy_regime, date) -> int:
     return 1
 
 
-# ============================================================
-#  PORTFOLIO CONSTRUCTION
-# ============================================================
-def _downside_adjusted_scores(candidates: list,
-                               momentum_scores: dict,
-                               returns_window: pd.DataFrame) -> dict:
-    if returns_window.empty or len(returns_window) < 6:
-        return momentum_scores
-
-    semi_devs = {}
-    for t in candidates:
-        if t not in returns_window.columns:
-            continue
-        r   = returns_window[t].dropna()
-        neg = r[r < 0]
-        semi_devs[t] = np.sqrt(np.mean(neg ** 2)) if len(neg) >= 3 else 0.0
-
-    if not semi_devs:
-        return momentum_scores
-
-    median_sd = np.median(list(semi_devs.values()))
-    adjusted  = {}
-    for t in candidates:
-        base = momentum_scores.get(t, 0.0)
-        sd   = semi_devs.get(t, 0.0)
-        if median_sd > 0 and sd > DOWNSIDE_VOL_MULT * median_sd:
-            adjusted[t] = base * (median_sd / sd)
+def _smooth_regime(regime: pd.Series, min_duration: int = 5) -> pd.Series:
+    """Suppress regime flips shorter than min_duration days."""
+    smoothed = regime.copy()
+    state    = regime.iloc[0]
+    count    = 0
+    pending  = None
+    for i, val in enumerate(regime):
+        if val == state:
+            count  += 1
+            pending = None
         else:
-            adjusted[t] = base
-    return adjusted
-
-
-def _momentum_proportional_weights(candidates: list,
-                                    adj_scores: dict) -> dict:
-    raw   = {t: max(adj_scores.get(t, 0.0), 0.0) for t in candidates}
-    total = sum(raw.values())
-    if total == 0:
-        eq = 1.0 / len(candidates)
-        return {t: eq for t in candidates}
-    w = {t: v / total for t, v in raw.items()}
-    for _ in range(3):
-        w = {t: min(max(v, MIN_WEIGHT), MAX_WEIGHT) for t, v in w.items()}
-        s = sum(w.values())
-        w = {t: v / s for t, v in w.items()}
-    return w
-
-
-def _get_dynamic_sector_caps(candidates: list,
-                              momentum_scores: dict) -> dict:
-    """Top-2 momentum sectors get MAX_SECTOR_W_TOP; others get MAX_SECTOR_W_BULL."""
-    sec_scores = defaultdict(list)
-    for t in candidates:
-        sec = UNIVERSE_WITH_SECTORS.get(t, "OTHER")
-        sec_scores[sec].append(momentum_scores.get(t, 0.0))
-    sec_avg = {s: np.mean(v) for s, v in sec_scores.items()}
-    top2    = sorted(sec_avg, key=lambda s: sec_avg[s], reverse=True)[:2]
-    return {s: (MAX_SECTOR_W_TOP if s in top2 else MAX_SECTOR_W_BULL)
-            for s in sec_avg}
-
-
-def _markowitz_weights(candidates, returns_hist, momentum_scores,
-                        objective: str, is_bull: bool) -> dict:
-    hist = returns_hist[candidates].dropna()
-    if len(hist) < 12 or len(candidates) < 3:
-        eq = 1.0 / len(candidates)
-        return {t: eq for t in candidates}
-
-    dyn_caps   = _get_dynamic_sector_caps(candidates, momentum_scores)
-    sector_cap = MAX_SECTOR_W_BEAR if not is_bull else MAX_SECTOR_W_BULL
-
-    try:
-        S  = risk_models.CovarianceShrinkage(
-                hist, returns_data=True, frequency=12).ledoit_wolf()
-        mu = pd.Series({t: momentum_scores.get(t, 0.0) for t in candidates})
-        ef = EfficientFrontier(mu, S,
-                               weight_bounds=(MIN_WEIGHT, MAX_WEIGHT),
-                               solver="CLARABEL")
-
-        for sec in set(UNIVERSE_WITH_SECTORS.get(t, "OTHER") for t in candidates):
-            cap  = dyn_caps.get(sec, sector_cap) if is_bull else MAX_SECTOR_W_BEAR
-            mask = [
-                1.0 if UNIVERSE_WITH_SECTORS.get(t, "OTHER") == sec else 0.0
-                for t in candidates
-            ]
-            if sum(mask) > 1:
-                ef.add_constraint(
-                    lambda w, m=mask, c=cap:
-                        sum(w[i] * m[i] for i in range(len(m))) <= c
-                )
-
-        if objective == "min_vol":
-            ef.min_volatility()
-        elif objective == "efficient_risk":
-            ef.efficient_risk(target_volatility=TARGET_VOL)
-        else:
-            ef.max_sharpe(risk_free_rate=RISK_FREE_RATE)
-
-        cleaned = ef.clean_weights(cutoff=MIN_WEIGHT, rounding=4)
-        return {t: w for t, w in cleaned.items() if w > 0.0}
-
-    except Exception:
-        vols = returns_hist[candidates].std()
-        inv  = {t: 1.0 / vols[t] if vols[t] > 0 else 1.0 for t in candidates}
-        tot  = sum(inv.values())
-        raw  = {t: v / tot for t, v in inv.items()}
-        cap  = {t: min(w, MAX_WEIGHT) for t, w in raw.items()}
-        tot2 = sum(cap.values())
-        return {t: w / tot2 for t, w in cap.items()}
+            if pending is None:
+                pending       = val
+                pending_count = 1
+            elif val == pending:
+                pending_count += 1
+                if pending_count >= min_duration:
+                    state   = pending
+                    pending = None
+            else:
+                pending       = val
+                pending_count = 1
+        smoothed.iloc[i] = state
+    return smoothed
 
 
 # ============================================================
 #  STRATEGY HELPERS
 # ============================================================
 def _apply_regime_tilt(weights: dict, regime: int) -> dict:
+    """In bear regime: boost defensive sectors, trim cyclicals."""
     if regime >= 0:
         return weights
     adj   = {
-        t: w * BEAR_DEF_BOOST if UNIVERSE_WITH_SECTORS.get(t, 'OTHER') in DEFENSIVE_SECTORS
+        t: w * BEAR_DEF_BOOST
+           if UNIVERSE_WITH_SECTORS.get(t, 'OTHER') in DEFENSIVE_SECTORS
            else w * 0.8
         for t, w in weights.items()
     }
@@ -418,20 +319,32 @@ def _apply_regime_tilt(weights: dict, regime: int) -> dict:
 
 
 def _apply_crash_protection(weights: dict, crash_mode: bool) -> dict:
-    if crash_mode:
-        return {t: w * CRASH_CASH_RATIO for t, w in weights.items()}
-    return weights
+    """Scale all weights down, implicitly raising cash."""
+    if not crash_mode:
+        return weights
+    return {t: w * CRASH_CASH_RATIO for t, w in weights.items()}
 
 
 def _apply_dd_circuit(weights: dict, active: bool) -> dict:
+    """Reduce overall exposure when peak-drawdown circuit is tripped."""
     if not active:
         return weights
     return {t: w * DD_EXPOSURE_SCALE for t, w in weights.items()}
 
 
-def _apply_spy_anchor(weights: dict, regime: int, spy_available: bool) -> dict:
-    """Reserve SPY_ANCHOR_W for SPY itself in bull regime to reduce tracking error."""
+def _apply_spy_anchor(
+    weights: dict,
+    regime: int,
+    spy_available: bool,
+    spy_mom_12_1: float | None,
+) -> dict:
+    """
+    In bull regime only, anchor SPY_ANCHOR_W to SPY — but only when SPY's
+    own 12-1 momentum is positive (avoids anchoring a lagging index).
+    """
     if regime != 1 or not spy_available:
+        return weights
+    if spy_mom_12_1 is None or pd.isna(spy_mom_12_1) or spy_mom_12_1 <= 0:
         return weights
     scaled = {t: w * (1.0 - SPY_ANCHOR_W) for t, w in weights.items()}
     scaled['SPY'] = SPY_ANCHOR_W
@@ -439,7 +352,7 @@ def _apply_spy_anchor(weights: dict, regime: int, spy_available: bool) -> dict:
 
 
 def _weights_changed_enough(prev: dict, new: dict) -> bool:
-    """Return True if rebalance is warranted (entry/exit or drift > REBAL_THRESHOLD)."""
+    """True if any position drifted beyond REBAL_THRESHOLD."""
     if set(prev.keys()) != set(new.keys()):
         return True
     return any(
@@ -448,29 +361,30 @@ def _weights_changed_enough(prev: dict, new: dict) -> bool:
     )
 
 
-def _compute_turnover_cost(prev_weights: dict, new_weights: dict) -> float:
-    all_t    = set(prev_weights) | set(new_weights)
-    turnover = sum(abs(new_weights.get(t, 0.0) - prev_weights.get(t, 0.0)) for t in all_t)
-    return turnover * TXN_COST_BPS / 10_000
-
-
 # ============================================================
 #  STRATEGY
 # ============================================================
-def run_strategy(prices, returns, mom_12_1, mom_6_1,
-                 spy_regime=None, spy_monthly_returns=None):
-    monthly_returns  = []
-    current_weights  = {}
-    prev_weights     = {}
-    order_book_rows  = []
-    weights_history  = {}
-    total_turnover   = 0.0
-    total_txn_cost   = 0.0
-    regime_counts    = {1: 0, 0: 0, -1: 0}
-    rebal_skipped    = 0
+def run_strategy(
+    prices:              pd.DataFrame,
+    returns:             pd.DataFrame,
+    mom_12_1:            pd.DataFrame,
+    mom_6_1:             pd.DataFrame,
+    spy_regime:          pd.Series | None = None,
+    spy_monthly_returns: pd.Series | None = None,
+) -> tuple[pd.Series, pd.DataFrame, dict]:
 
-    equity_value = 1.0
-    equity_peak  = 1.0
+    monthly_returns = []
+    current_weights: dict = {}
+    prev_weights:    dict = {}
+    order_book_rows: list = []
+    weights_history: dict = {}
+    total_turnover  = 0.0
+    total_txn_cost  = 0.0
+    regime_counts   = {1: 0, 0: 0, -1: 0}
+    rebal_skipped   = 0
+
+    equity_value  = 1.0
+    equity_peak   = 1.0
     dd_circuit_on = False
 
     spy_in_universe = 'SPY' in returns.columns
@@ -478,19 +392,25 @@ def run_strategy(prices, returns, mom_12_1, mom_6_1,
     for i in range(len(returns)):
         date = returns.index[i]
 
-        # ── Mark-to-market ─────────────────────────────────────────────
+        # ── Mark-to-market ──────────────────────────────────────────────
         if current_weights:
             pnl = sum(
                 returns[t].iloc[i] * w
                 for t, w in current_weights.items()
                 if t in returns.columns and not pd.isna(returns[t].iloc[i])
             )
+            # Drift weights based on monthly performance
+            current_weights = {
+                t: w * (1 + returns[t].iloc[i]) / (1 + pnl)
+                for t, w in current_weights.items()
+                if (1 + pnl) != 0
+            }
             monthly_returns.append(pnl)
             equity_value *= (1 + pnl)
         else:
             monthly_returns.append(0.0)
 
-        # ── Peak-drawdown circuit ───────────────────────────────────────
+        # ── Peak-drawdown circuit ────────────────────────────────────────
         equity_peak = max(equity_peak, equity_value)
         current_dd  = (equity_value - equity_peak) / equity_peak
         if not dd_circuit_on and current_dd < DD_REDUCE_THRESH:
@@ -501,8 +421,18 @@ def run_strategy(prices, returns, mom_12_1, mom_6_1,
         s12 = mom_12_1.iloc[i]
         s6  = mom_6_1.iloc[i]
 
-        # ── Eligibility ────────────────────────────────────────────────
-        eligible = {}
+        # ── Crash mode: use SPY's own 12-1 momentum ─────────────────────
+        # The eligible-pool average is always positive by construction, so
+        # it is not a reliable crash signal. SPY's momentum is.
+        spy_12_1: float | None = (
+            float(s12['SPY'])
+            if 'SPY' in s12.index and not pd.isna(s12.get('SPY'))
+            else None
+        )
+        crash_mode = spy_12_1 is not None and spy_12_1 < 0
+
+        # ── Eligibility ─────────────────────────────────────────────────
+        eligible: dict[str, float] = {}
         for t in SP500_UNIVERSE:
             if t not in s12.index or t not in s6.index:
                 continue
@@ -512,20 +442,20 @@ def run_strategy(prices, returns, mom_12_1, mom_6_1,
             if float(v12) > 0.0 and float(v6) > MOM_6_1_VETO:
                 eligible[t] = float(v12)
 
+        # Widen pool if too few pass the dual filter
         if len(eligible) < 5:
             eligible = {
                 t: float(s12[t])
                 for t in SP500_UNIVERSE
-                if t in s12.index and not pd.isna(s12.get(t)) and float(s12[t]) > 0.0
+                if t in s12.index
+                and not pd.isna(s12.get(t))
+                and float(s12[t]) > 0.0
             }
         if len(eligible) < 3:
             weights_history[date] = {}
             current_weights       = {}
             prev_weights          = {}
             continue
-
-        avg_momentum = np.mean(list(eligible.values()))
-        crash_mode   = avg_momentum < 0
 
         ranked     = sorted(eligible, key=lambda t: eligible[t], reverse=True)
         candidates = ranked[:CANDIDATE_SIZE]
@@ -538,117 +468,139 @@ def run_strategy(prices, returns, mom_12_1, mom_6_1,
             and returns_window[t].notna().sum() >= 12
         ]
 
-        # ── Regime: base from 200-MA/HMM + fast crash override ─────────
+        # ── Regime: base from HMM/200-MA + fast SPY crash override ──────
         regime = _get_regime_state(spy_regime, date)
 
-        # Fast bear override — if SPY fell > SPY_CRASH_THRESH last month
         if spy_monthly_returns is not None and i > 0:
             try:
-                spy_mo = spy_monthly_returns.iloc[i - 1]
-                if not pd.isna(spy_mo) and float(spy_mo) < SPY_CRASH_THRESH:
+                spy_mo = float(spy_monthly_returns.iloc[i - 1])
+                if not pd.isna(spy_mo) and spy_mo < SPY_CRASH_THRESH:
                     regime = -1
             except Exception:
                 pass
 
-        regime_counts[regime if regime in regime_counts else 0] += 1
+        # Clamp to valid keys; unknown values count as neutral
+        regime_counts[regime if regime in (-1, 0, 1) else 0] += 1
 
-        adj_scores = _downside_adjusted_scores(candidates, eligible, returns_window)
+        adj_scores = downside_adjusted_scores(
+            candidates, eligible, returns_window, DOWNSIDE_VOL_MULT
+        )
 
-        # ── Regime-conditional construction ────────────────────────────
+        # ── Regime-conditional portfolio construction ────────────────────
+        markowitz_kwargs = dict(
+            universe_with_sectors=UNIVERSE_WITH_SECTORS,
+            min_weight=MIN_WEIGHT,
+            max_weight=MAX_WEIGHT,
+            max_sector_w_top=MAX_SECTOR_W_TOP,
+            max_sector_w_bull=MAX_SECTOR_W_BULL,
+            max_sector_w_bear=MAX_SECTOR_W_BEAR,
+            target_vol=TARGET_VOL,
+            risk_free_rate=RISK_FREE_RATE,
+        )
+
         if regime == 1:
-            new_weights = _momentum_proportional_weights(candidates, adj_scores)
+            # Bull: Risk-Parity Momentum (vol-adjusted for better Sharpe)
+            new_weights = risk_parity_momentum_weights(
+                candidates, adj_scores, returns_window, MIN_WEIGHT, MAX_WEIGHT
+            )
+
         elif regime == -1:
+            # Bear: minimum-variance Markowitz
             if len(available) >= 3:
-                new_weights = _markowitz_weights(
+                new_weights = markowitz_weights(
                     available, returns_window, eligible,
-                    objective="min_vol", is_bull=False
-                )
-            else:
-                top = candidates[:10]
-                new_weights = {t: 1.0 / len(top) for t in top}
-        else:
-            if len(available) >= 3:
-                new_weights = _markowitz_weights(
-                    available, returns_window, eligible,
-                    objective="efficient_risk", is_bull=True
+                    objective="min_vol", is_bull=False,
+                    **markowitz_kwargs,
                 )
             else:
                 top = candidates[:10]
                 new_weights = {t: 1.0 / len(top) for t in top}
 
+        else:
+            # Neutral (regime == 0): efficient-risk Markowitz
+            if len(available) >= 3:
+                new_weights = markowitz_weights(
+                    available, returns_window, eligible,
+                    objective="efficient_risk", is_bull=True,
+                    **markowitz_kwargs,
+                )
+            else:
+                top = candidates[:10]
+                new_weights = {t: 1.0 / len(top) for t in top}
+
+        # ── Overlays (order matters) ─────────────────────────────────────
         new_weights = _apply_regime_tilt(new_weights, regime)
         new_weights = _apply_crash_protection(new_weights, crash_mode)
         new_weights = _apply_dd_circuit(new_weights, dd_circuit_on)
-        new_weights = _apply_spy_anchor(new_weights, regime, spy_in_universe)
+        new_weights = _apply_spy_anchor(
+            new_weights, regime, spy_in_universe, spy_12_1
+        )
 
-        # ── Skip rebalance if drift is negligible ──────────────────
-        if prev_weights and not _weights_changed_enough(prev_weights, new_weights):
+        # ── Skip rebalance if drift is negligible ────────────────────────
+        if current_weights and not _weights_changed_enough(current_weights, new_weights):
             rebal_skipped += 1
             weights_history[date] = dict(current_weights)
             continue
 
-        # ── Transaction costs ───────────────────────────────────────────
-        txn_cost = _compute_turnover_cost(prev_weights, new_weights)
-        turnover = sum(
+        # ── Transaction costs ────────────────────────────────────────────
+        all_tickers = set(prev_weights) | set(new_weights)
+        turnover    = sum(
             abs(new_weights.get(t, 0.0) - prev_weights.get(t, 0.0))
-            for t in set(prev_weights) | set(new_weights)
+            for t in all_tickers
         )
+        txn_cost        = turnover * TXN_COST_BPS / 10_000
         total_turnover += turnover
         total_txn_cost += txn_cost
+
+        # Deduct cost from equity and from this month's already-booked return
+        equity_value           *= (1 - txn_cost)
         if monthly_returns:
             monthly_returns[-1] -= txn_cost
 
-        # ── Order book ──────────────────────────────────────────────────
-        prev_set = set(prev_weights)
-        new_set  = set(new_weights)
+        # ── Order book ───────────────────────────────────────────────────
+        regime_label = {1: "Bull", 0: "Neutral", -1: "Bear"}.get(regime, "?")
+        prev_set, new_set = set(prev_weights), set(new_weights)
+
+        def _ob_row(ticker, action, weight):
+            return {
+                "Date":        str(date),
+                "Ticker":      ticker,
+                "Sector":      UNIVERSE_WITH_SECTORS.get(ticker, "?"),
+                "Action":      action,
+                "Weight_%":    round(weight * 100, 2),
+                "Mom_12_1_%":  round(eligible.get(ticker, 0) * 100, 2),
+                "Regime":      regime_label,
+                "DD_Circuit":  dd_circuit_on,
+                "Price":       round(float(prices[ticker].iloc[i]), 2)
+                               if ticker in prices.columns else None,
+            }
+
         for t in new_set - prev_set:
-            order_book_rows.append({
-                "Date": str(date), "Ticker": t,
-                "Sector": UNIVERSE_WITH_SECTORS.get(t, "?"),
-                "Action": "BUY",
-                "Weight_%": round(new_weights[t] * 100, 2),
-                "Mom_12_1_%": round(eligible.get(t, 0) * 100, 2),
-                "Regime": {1: "Bull", 0: "Neutral", -1: "Bear"}.get(regime, "?"),
-                "DD_Circuit": dd_circuit_on,
-                "Price": round(float(prices[t].iloc[i]), 2) if t in prices.columns else None,
-            })
+            order_book_rows.append(_ob_row(t, "BUY", new_weights[t]))
         for t in prev_set - new_set:
-            order_book_rows.append({
-                "Date": str(date), "Ticker": t,
-                "Sector": UNIVERSE_WITH_SECTORS.get(t, "?"),
-                "Action": "SELL",
-                "Weight_%": 0.0,
-                "Mom_12_1_%": round(eligible.get(t, 0) * 100, 2),
-                "Regime": {1: "Bull", 0: "Neutral", -1: "Bear"}.get(regime, "?"),
-                "DD_Circuit": dd_circuit_on,
-                "Price": round(float(prices[t].iloc[i]), 2) if t in prices.columns else None,
-            })
+            order_book_rows.append(_ob_row(t, "SELL", 0.0))
         for t in prev_set & new_set:
-            delta = abs(new_weights[t] - prev_weights[t])
-            if delta > 0.005:
-                action = "ADD" if new_weights[t] > prev_weights[t] else "TRIM"
-                order_book_rows.append({
-                    "Date": str(date), "Ticker": t,
-                    "Sector": UNIVERSE_WITH_SECTORS.get(t, "?"),
-                    "Action": action,
-                    "Weight_%": round(new_weights[t] * 100, 2),
-                    "Mom_12_1_%": round(eligible.get(t, 0) * 100, 2),
-                    "Regime": {1: "Bull", 0: "Neutral", -1: "Bear"}.get(regime, "?"),
-                    "DD_Circuit": dd_circuit_on,
-                    "Price": round(float(prices[t].iloc[i]), 2) if t in prices.columns else None,
-                })
+            delta = new_weights[t] - prev_weights[t]
+            if abs(delta) > ORDER_BOOK_MIN_DELTA:
+                action = "ADD" if delta > 0 else "TRIM"
+                order_book_rows.append(_ob_row(t, action, new_weights[t]))
 
         current_weights       = new_weights
         prev_weights          = dict(new_weights)
         weights_history[date] = dict(new_weights)
 
-    strategy_returns = pd.Series(monthly_returns, index=returns.index, name="Monthly Return")
-    order_book_df    = pd.DataFrame(order_book_rows)
+    strategy_returns = pd.Series(
+        monthly_returns, index=returns.index, name="Monthly Return"
+    )
+    order_book_df = pd.DataFrame(order_book_rows)
 
     total = sum(regime_counts.values()) or 1
-    print(f"  Regime: Bull {regime_counts[1]/total*100:.0f}%  "
-          f"Neutral {regime_counts[0]/total*100:.0f}%  "
-          f"Bear {regime_counts[-1]/total*100:.0f}%")
+    print(
+        f"  Regime distribution:  "
+        f"Bull {regime_counts[1]/total*100:.0f}%  "
+        f"Neutral {regime_counts[0]/total*100:.0f}%  "
+        f"Bear {regime_counts[-1]/total*100:.0f}%"
+    )
     print(f"  Total turnover:   {total_turnover:.2f}  (skipped {rebal_skipped} rebalances)")
     print(f"  Total txn costs:  {total_txn_cost * 100:.3f}% of equity")
     return strategy_returns, order_book_df, weights_history
@@ -657,36 +609,33 @@ def run_strategy(prices, returns, mom_12_1, mom_6_1,
 # ============================================================
 #  ROLLING RISK METRICS
 # ============================================================
-def rolling_risk_metrics(strat_ts: pd.Series,
-                          spy_ts: pd.Series,
-                          window: int = 24) -> pd.DataFrame:
-    idx     = strat_ts.index
+def rolling_risk_metrics(
+    strat_ts: pd.Series,
+    spy_ts:   pd.Series,
+    window:   int = 24,
+) -> pd.DataFrame:
+    idx = strat_ts.index
     sharpes, sortinos, calmars, irs, tes = [], [], [], [], []
 
     for i in range(len(idx)):
         if i < window:
-            sharpes.append(np.nan); sortinos.append(np.nan)
-            calmars.append(np.nan); irs.append(np.nan); tes.append(np.nan)
+            sharpes.append(np.nan);  sortinos.append(np.nan)
+            calmars.append(np.nan);  irs.append(np.nan)
+            tes.append(np.nan)
             continue
-        s  = strat_ts.iloc[i - window: i]
-        b  = spy_ts.reindex(s.index).fillna(0)
-        mu = s.mean() * 12
-        sv = s.std() * np.sqrt(12)
+        s = strat_ts.iloc[i - window: i]
+        b = spy_ts.reindex(s.index).fillna(0)
+        sharpes.append(kpi.sharpe_ratio(s,  risk_free_rate=RISK_FREE_RATE, periods_per_year=12))
+        sortinos.append(kpi.sortino_ratio(s, risk_free_rate=RISK_FREE_RATE, periods_per_year=12))
+        calmars.append(kpi.calmar_ratio(s,  periods_per_year=12))
+        irs.append(kpi.information_ratio(s, b, periods_per_year=12))
+        tes.append(kpi.volatility(s - b, periods_per_year=12))
 
-        sharpes.append((mu - RISK_FREE_RATE) / sv if sv > 0 else np.nan)
-        sortinos.append(_sortino(s))
-        calmars.append(_calmar(s))
-        irs.append(_information_ratio(s, b))
-        active = s - b
-        tes.append(active.std() * np.sqrt(12))
-
-    return pd.DataFrame({
-        "Sharpe":  sharpes,
-        "Sortino": sortinos,
-        "Calmar":  calmars,
-        "IR":      irs,
-        "TE":      tes,
-    }, index=idx)
+    return pd.DataFrame(
+        {"Sharpe": sharpes, "Sortino": sortinos,
+         "Calmar": calmars, "IR": irs, "TE": tes},
+        index=idx,
+    )
 
 
 # ============================================================
@@ -698,10 +647,11 @@ def build_dashboard(
     weights_history:  dict,
     spy_returns:      pd.Series,
     metrics:          dict,
-):
+) -> go.Figure:
+
     strategy_returns = _to_period_index(strategy_returns)
     spy_returns      = _to_period_index(spy_returns)
-    spy_aligned = spy_returns.reindex(strategy_returns.index, method='ffill').fillna(0)
+    spy_aligned      = spy_returns.reindex(strategy_returns.index, method='ffill').fillna(0)
 
     strat_ts       = strategy_returns.copy()
     strat_ts.index = strategy_returns.index.to_timestamp()
@@ -709,7 +659,7 @@ def build_dashboard(
     spy_ts.index   = spy_aligned.index.to_timestamp()
 
     equity   = (1 + strat_ts).cumprod() * 100_000
-    spy_eq   = (1 + spy_ts).cumprod() * 100_000
+    spy_eq   = (1 + spy_ts).cumprod()   * 100_000
     roll_max = equity.cummax()
     drawdown = (equity - roll_max) / roll_max * 100
 
@@ -742,13 +692,13 @@ def build_dashboard(
         vertical_spacing=0.10,
         horizontal_spacing=0.08,
         specs=[
-            [{"type": "xy"},    {"type": "xy"}],
-            [{"type": "xy"},    {"type": "xy"}],
-            [{"type": "xy"},    {"type": "xy", "secondary_y": True}],
+            [{"type": "xy"},  {"type": "xy"}],
+            [{"type": "xy"},  {"type": "xy"}],
+            [{"type": "xy"},  {"type": "xy", "secondary_y": True}],
         ],
     )
 
-    # Panel 1 — Equity
+    # ── Panel 1: Equity ─────────────────────────────────────────────────
     fig.add_trace(go.Scatter(
         x=equity.index, y=equity.values, name="Strategy",
         line=dict(color="#4C78A8", width=2.5),
@@ -759,14 +709,15 @@ def build_dashboard(
         line=dict(color="#F58518", width=1.8, dash="dot"),
         hovertemplate="%{x|%b %Y}<br>$%{y:,.0f}<extra>SPY</extra>",
     ), row=1, col=1)
-    fig.add_annotation(x=equity.index[-1], y=float(equity.iloc[-1]),
-        text=f"  ${float(equity.iloc[-1]):,.0f}",
-        showarrow=False, font=dict(color="#4C78A8", size=11), row=1, col=1)
-    fig.add_annotation(x=spy_eq.index[-1], y=float(spy_eq.iloc[-1]),
-        text=f"  ${float(spy_eq.iloc[-1]):,.0f}",
-        showarrow=False, font=dict(color="#F58518", size=11), row=1, col=1)
+    for series, color in [(equity, "#4C78A8"), (spy_eq, "#F58518")]:
+        fig.add_annotation(
+            x=series.index[-1], y=float(series.iloc[-1]),
+            text=f"  ${float(series.iloc[-1]):,.0f}",
+            showarrow=False, font=dict(color=color, size=11),
+            row=1, col=1,
+        )
 
-    # Panel 2 — Drawdown
+    # ── Panel 2: Drawdown ────────────────────────────────────────────────
     fig.add_trace(go.Scatter(
         x=drawdown.index, y=drawdown.values,
         fill="tozeroy", fillcolor="rgba(229,115,115,0.25)",
@@ -774,14 +725,14 @@ def build_dashboard(
         hovertemplate="%{x|%b %Y}<br>%{y:.1f}%<extra>Drawdown</extra>",
     ), row=1, col=2)
 
-    # Panel 3 — Heatmap
+    # ── Panel 3: Heatmap ─────────────────────────────────────────────────
     valid = heat_pivot.values[~np.isnan(heat_pivot.values)]
     zmax  = max(abs(valid.max()), abs(valid.min())) if len(valid) else 1.0
     fig.add_trace(go.Heatmap(
         z=heat_pivot.values,
         x=heat_pivot.columns.tolist(),
         y=[str(y) for y in heat_pivot.index.tolist()],
-        colorscale=[[0.0,"#c0392b"],[0.5,"#f7f7f7"],[1.0,"#27ae60"]],
+        colorscale=[[0.0, "#c0392b"], [0.5, "#f7f7f7"], [1.0, "#27ae60"]],
         zmid=0, zmin=-zmax, zmax=zmax,
         text=np.round(heat_pivot.values, 1), texttemplate="%{text}",
         textfont=dict(size=9),
@@ -790,9 +741,8 @@ def build_dashboard(
         name="Monthly Ret",
     ), row=2, col=1)
 
-    # Panel 4 — Rolling ratios
-    colors = {"Sharpe": "#4C78A8", "Sortino": "#72B7B2", "Calmar": "#F58518"}
-    for metric, color in colors.items():
+    # ── Panel 4: Rolling ratios ──────────────────────────────────────────
+    for metric, color in [("Sharpe", "#4C78A8"), ("Sortino", "#72B7B2"), ("Calmar", "#F58518")]:
         fig.add_trace(go.Scatter(
             x=roll.index, y=roll[metric].values,
             line=dict(color=color, width=1.8), name=metric,
@@ -801,15 +751,15 @@ def build_dashboard(
     fig.add_hline(y=0, line=dict(color="gray",    dash="dot",  width=1), row=2, col=2)
     fig.add_hline(y=1, line=dict(color="#27ae60", dash="dash", width=1), row=2, col=2)
 
-    # Panel 5 — Sector composition
+    # ── Panel 5: Sector composition ──────────────────────────────────────
     sector_wh = pd.DataFrame(index=wh_df.index)
     for sec in sorted(set(UNIVERSE_WITH_SECTORS.values())):
         tks = [t for t in wh_df.columns if UNIVERSE_WITH_SECTORS.get(t) == sec]
         if tks:
             sector_wh[sec] = wh_df[tks].sum(axis=1)
     for sec in sector_wh.columns:
-        color = SECTOR_COLORS.get(sec, "#aaaaaa")
-        r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+        color    = SECTOR_COLORS.get(sec, "#aaaaaa")
+        r, g, b  = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
         fig.add_trace(go.Scatter(
             x=sector_wh.index, y=sector_wh[sec].values,
             stackgroup="one", name=sec,
@@ -819,7 +769,7 @@ def build_dashboard(
             legendgroup=sec,
         ), row=3, col=1)
 
-    # Panel 6 — Rolling IR + Tracking Error
+    # ── Panel 6: Rolling IR + Tracking Error ────────────────────────────
     ir_colors = ["#27ae60" if v >= 0 else "#c0392b"
                  for v in roll["IR"].fillna(0)]
     fig.add_trace(go.Bar(
@@ -837,7 +787,7 @@ def build_dashboard(
     ), row=3, col=2, secondary_y=True)
     fig.add_hline(y=0, line=dict(color="gray", dash="dot", width=1), row=3, col=2)
 
-    # Metrics annotation
+    # ── Metrics annotation ───────────────────────────────────────────────
     metric_lines = [
         "<b>Risk-Adjusted Summary</b>",
         f"CAGR:           {metrics['CAGR (%)']:.1f}%",
@@ -877,11 +827,11 @@ def build_dashboard(
     )
     fig.update_yaxes(title_text="Portfolio Value ($)", row=1, col=1,
                      tickprefix="$", tickformat=",")
-    fig.update_yaxes(title_text="Drawdown (%)",   row=1, col=2)
-    fig.update_yaxes(title_text="Return (%)",     row=2, col=1)
-    fig.update_yaxes(title_text="Ratio",          row=2, col=2)
-    fig.update_yaxes(title_text="Allocation (%)", row=3, col=1)
-    fig.update_yaxes(title_text="Info Ratio",     row=3, col=2)
+    fig.update_yaxes(title_text="Drawdown (%)",       row=1, col=2)
+    fig.update_yaxes(title_text="Return (%)",         row=2, col=1)
+    fig.update_yaxes(title_text="Ratio",              row=2, col=2)
+    fig.update_yaxes(title_text="Allocation (%)",     row=3, col=1)
+    fig.update_yaxes(title_text="Info Ratio",         row=3, col=2)
     fig.update_yaxes(title_text="Tracking Error (%)", row=3, col=2, secondary_y=True)
 
     return fig
@@ -890,7 +840,7 @@ def build_dashboard(
 # ============================================================
 #  MAIN
 # ============================================================
-def main():
+def main() -> None:
     print("=" * 62)
     print("  Monthly Rebalancing: Risk-Adjusted Optimisation")
     print("=" * 62)
@@ -900,68 +850,58 @@ def main():
     print(f"    Neutral → Markowitz efficient_risk (target vol {TARGET_VOL*100:.0f}%)")
     print(f"    Bear    → Markowitz min_vol")
     print(f"  Candidates: top {CANDIDATE_SIZE}  |  bounds: [{MIN_WEIGHT*100:.0f}%, {MAX_WEIGHT*100:.0f}%]")
-    print(f"  Sector cap: bull {MAX_SECTOR_W_BULL*100:.0f}% (top-2 sectors {MAX_SECTOR_W_TOP*100:.0f}%)  /  bear {MAX_SECTOR_W_BEAR*100:.0f}%")
+    print(f"  Sector cap: bull {MAX_SECTOR_W_BULL*100:.0f}% "
+          f"(top-2 sectors {MAX_SECTOR_W_TOP*100:.0f}%)  /  bear {MAX_SECTOR_W_BEAR*100:.0f}%")
     print(f"  Peak-DD circuit: fires at {DD_REDUCE_THRESH*100:.0f}%"
           f" → {DD_EXPOSURE_SCALE*100:.0f}% exposure"
           f" | restores at {DD_RESTORE_THRESH*100:.0f}%")
     print(f"  Regime: 200-MA dead-band ±{int((REGIME_BULL_BAND-1)*100)}%"
           f"  +  fast bear if SPY 1-mo < {SPY_CRASH_THRESH*100:.0f}%")
-    print(f"  SPY anchor: {SPY_ANCHOR_W*100:.0f}% in bull regime")
+    print(f"  SPY anchor: {SPY_ANCHOR_W*100:.0f}% in bull regime (when SPY momentum > 0)")
     print(f"  Rebalance threshold: {REBAL_THRESHOLD*100:.0f}% drift")
     print(f"  Cov lookback: {COV_LOOKBACK} months  |  Txn cost: {TXN_COST_BPS} bps\n")
 
-    # ── SPY benchmark ──────────────────────────────────────────────────
+    # ── SPY benchmark ────────────────────────────────────────────────────
     print("  Fetching SPY benchmark...")
-    spy_raw = yf.download("SPY", start=START_DATE, end=END_DATE,
-                          interval="1mo", auto_adjust=True, progress=False)
-    if isinstance(spy_raw.columns, pd.MultiIndex):
-        spy_price = spy_raw["Close"].squeeze()
-    elif "Close" in spy_raw.columns:
-        spy_price = spy_raw["Close"]
-    else:
-        spy_price = spy_raw['Close']
-    if isinstance(spy_price, pd.DataFrame):
-        spy_price = spy_price.iloc[:, 0]
-    spy_rets = np.log(spy_price / spy_price.shift(1)).dropna()
-    spy_rets = _to_period_index(spy_rets)
+    spy_raw    = yf.download("SPY", start=START_DATE, end=END_DATE,
+                             interval="1mo", auto_adjust=True, progress=False)
+    spy_price  = _extract_close(spy_raw)
+    spy_rets   = _to_period_index(np.log(spy_price / spy_price.shift(1)).dropna())
     print(f"  SPY: {len(spy_rets)} monthly bars | mean {spy_rets.mean()*100:.2f}%/mo  ✅")
 
-    # ── SPY monthly returns aligned for fast-bear trigger ──────────────
-    spy_monthly_aligned = spy_rets.copy()
-
-    # ── Regime ─────────────────────────────────────────────────────────
+    # ── Regime detection (daily SPY) ─────────────────────────────────────
     print("  Fetching daily SPY for regime detection...")
     spy_regime = None
     try:
-        spy_daily = yf.download("SPY", start=START_DATE, end=END_DATE,
-                                interval="1d", auto_adjust=True, progress=False)
-        if isinstance(spy_daily.columns, pd.MultiIndex):
-            spy_dc = spy_daily["Close"].squeeze()
-        elif "Close" in spy_daily.columns:
-            spy_dc = spy_daily["Close"]
-        else:
-            spy_dc = spy_daily['Close']
-        if isinstance(spy_dc, pd.DataFrame):
-            spy_dc = spy_dc.iloc[:, 0]
-        spy_regime = _detect_regime(spy_dc)
+        spy_daily_raw = yf.download("SPY", start=START_DATE, end=END_DATE,
+                                    interval="1d", auto_adjust=True, progress=False)
+        spy_daily_close = _extract_close(spy_daily_raw).dropna()                            
+        
+        print("  Fetching daily VIX for regime detection...")
+        vix_raw = yf.download("^VIX", start=START_DATE, end=END_DATE,
+                              interval="1d", auto_adjust=True, progress=False)
+        vix_close = _extract_close(vix_raw).dropna()
+        
+        spy_regime = _detect_regime(spy_daily_close, vix_prices_daily=vix_close)
     except Exception as e:
         print(f"  ⚠️  Regime detection skipped: {e}")
 
-    # ── Price data ──────────────────────────────────────────────────────
+    # ── Price data ───────────────────────────────────────────────────────
     print("  Fetching price data from store...")
     from data_ingestion.data_store import load_universe_data, update_universe_data
+
     update_universe_data(SP500_UNIVERSE, start=START_DATE, end=END_DATE, interval='1mo')
     ohlcv   = load_universe_data(SP500_UNIVERSE, interval='1mo')
     prices  = build_prices(ohlcv)
     returns = compute_returns(prices).dropna(how='all')
     prices  = prices.reindex(returns.index)
 
-    # Ensure monthly alignment with PeriodIndex
     if not isinstance(returns.index, pd.PeriodIndex):
         returns.index = pd.PeriodIndex(returns.index, freq='M')
     if not isinstance(prices.index, pd.PeriodIndex):
         prices.index = pd.PeriodIndex(prices.index, freq='M')
 
+    # Quality filter: keep tickers with ≥ 80% price coverage
     coverage = prices.notna().mean()
     good     = coverage[coverage > 0.80].index
     prices   = prices[good]
@@ -972,12 +912,11 @@ def main():
         print(f"⚠️  Only {len(returns)} months — need ≥ {MIN_BACKTEST_MONTHS}. Exiting.")
         return
 
-    # Align SPY monthly returns to the same PeriodIndex
-    spy_mo_aligned = spy_monthly_aligned.reindex(returns.index, method='ffill').fillna(0)
+    spy_mo_aligned = spy_rets.reindex(returns.index, method='ffill').fillna(0)
+    mom_12_1       = compute_12_1(prices)
+    mom_6_1        = compute_6_1(prices)
 
-    mom_12_1 = compute_12_1(prices)
-    mom_6_1  = compute_6_1(prices)
-
+    # ── Run strategy ──────────────────────────────────────────────────────
     print("  Running strategy ...\n")
     strategy_returns, order_book_df, weights_history = run_strategy(
         prices, returns, mom_12_1, mom_6_1,
@@ -986,20 +925,25 @@ def main():
     )
     strategy_returns = _to_period_index(strategy_returns)
 
-    # ── VBT backtest ────────────────────────────────────────────────────
-    strat_for_vbt       = strategy_returns.copy()
-    strat_for_vbt.index = strategy_returns.index.to_timestamp()
-    strategy_close = (1 + strat_for_vbt).cumprod() * 100
-    entries = pd.Series(True,  index=strat_for_vbt.index)
-    exits   = pd.Series(False, index=strat_for_vbt.index)
-    exits.iloc[-1] = True
+    # ── VBT backtest ──────────────────────────────────────────────────────
+    # weights_df is constructed from the dict and aligned to the full price index
+    weights_df = pd.DataFrame.from_dict(weights_history, orient="index").sort_index()
+    weights_df = weights_df.reindex(prices.index, method="ffill").fillna(0.0)
+    
+    weights_df.index = pd.to_datetime([d.to_timestamp() if hasattr(d, 'to_timestamp') else d for d in weights_df.index])
+    
+    # Ensure prices matches weights index for VBT
+    vbt_prices = prices.copy()
+    vbt_prices.index = pd.to_datetime([d.to_timestamp() if hasattr(d, 'to_timestamp') else d for d in vbt_prices.index])
+    
     bt = VBTBacktester(
-        close=strategy_close, entries=entries, exits=exits,
+        close=vbt_prices,
         freq='30D', init_cash=CASH, commission=COMMISSION,
     )
-    bt.full_analysis(n_mc=1000, n_wf_splits=5, n_trials=1)
+    bt.run_from_weights(weights_df)
+    bt.full_analysis(benchmark_series=spy_daily_close, n_mc=1000, n_wf_splits=5, n_trials=1)
 
-    # ── Full risk-adjusted metrics ──────────────────────────────────────
+    # ── Risk-adjusted metrics ─────────────────────────────────────────────
     spy_aligned = spy_rets.reindex(strategy_returns.index, method='ffill').fillna(0)
     metrics     = compute_full_metrics(strategy_returns, spy_aligned)
     spy_metrics = compute_full_metrics(spy_aligned, spy_aligned)
@@ -1010,27 +954,21 @@ def main():
     print(f"  {'Metric':<26} {'Strategy':>12} {'SPY':>10}")
     print(f"  {'-'*26} {'-'*12} {'-'*10}")
     for k in metrics:
-        sv     = metrics[k]
-        bv     = spy_metrics.get(k, "—")
-        sv_str = f"{sv:>12}"
-        bv_str = f"{bv:>10}"
-        print(f"  {k:<26} {sv_str} {bv_str}")
+        print(f"  {k:<26} {str(metrics[k]):>12} {str(spy_metrics.get(k, '—')):>10}")
     print("=" * 62 + "\n")
 
-    # ── Save outputs ────────────────────────────────────────────────────
+    # ── Save outputs ──────────────────────────────────────────────────────
     ob_path = REPORTS_DIR / "order_book.csv"
     order_book_df.to_csv(ob_path, index=False)
     print(f"  ✅ Order book saved → {ob_path}")
 
     metrics_path = REPORTS_DIR / "metrics.csv"
-    pd.DataFrame([metrics, spy_metrics],
-                 index=["Strategy", "SPY"]).to_csv(metrics_path)
+    pd.DataFrame([metrics, spy_metrics], index=["Strategy", "SPY"]).to_csv(metrics_path)
     print(f"  ✅ Metrics saved    → {metrics_path}")
 
     print("\n  Building dashboard...")
-    fig = build_dashboard(
-        strategy_returns, order_book_df, weights_history, spy_rets, metrics
-    )
+    fig       = build_dashboard(strategy_returns, order_book_df, weights_history,
+                                spy_rets, metrics)
     dash_path = REPORTS_DIR / "portfolio_dashboard.html"
     fig.write_html(str(dash_path), include_plotlyjs="cdn", full_html=True)
     print(f"  ✅ Dashboard saved  → {dash_path}")

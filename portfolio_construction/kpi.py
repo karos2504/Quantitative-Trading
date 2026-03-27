@@ -114,6 +114,50 @@ def sortino_ratio(returns: pd.Series, risk_free_rate: float, periods_per_year: i
     return annualized_excess / downside_dev
 
 
+def information_ratio(returns: pd.Series, benchmark_returns: pd.Series, periods_per_year: int) -> float:
+    """
+    Annualized Information Ratio: (Average Active Return) / (Tracking Error).
+    """
+    active_returns = returns - benchmark_returns.reindex(returns.index).fillna(0)
+    std_active = _to_scalar(active_returns.std())
+    if std_active == 0:
+        return np.nan
+    return (active_returns.mean() * periods_per_year) / (std_active * np.sqrt(periods_per_year))
+
+
+def gain_pain_ratio(returns: pd.Series) -> float:
+    """
+    Gain/Pain Ratio: sum(positive returns) / |sum(negative returns)|.
+    """
+    pos = returns[returns > 0].sum()
+    neg = abs(returns[returns < 0].sum())
+    return _to_scalar(pos / neg) if neg != 0 else np.nan
+
+
+def max_recovery_period(returns: pd.Series) -> int:
+    """
+    Calculates the maximum number of periods in a drawdown.
+    """
+    cumulative = (1 + returns).cumprod()
+    peak = cumulative.cummax()
+    in_drawdown = (cumulative < peak).astype(int)
+    
+    # Calculate consecutive ones
+    runs = []
+    current_run = 0
+    for val in in_drawdown:
+        if val == 1:
+            current_run += 1
+        else:
+            if current_run > 0:
+                runs.append(current_run)
+            current_run = 0
+    if current_run > 0:
+        runs.append(current_run)
+    
+    return max(runs) if runs else 0
+
+
 def max_drawdown(returns: pd.Series) -> float:
     """
     Maximum drawdown from a returns Series.
@@ -126,8 +170,8 @@ def max_drawdown(returns: pd.Series) -> float:
     """
     cumulative = (1 + returns).cumprod()
     peak = cumulative.cummax()
-    drawdown = (cumulative - peak) / peak
-    return _to_scalar(drawdown.min())
+    drawdown = (peak - cumulative) / peak
+    return _to_scalar(drawdown.max())
 
 
 def max_drawdown_from_prices(df: pd.DataFrame, price_col: str = 'Close') -> float:
@@ -143,8 +187,8 @@ def max_drawdown_from_prices(df: pd.DataFrame, price_col: str = 'Close') -> floa
     """
     prices = df[price_col]
     peak = prices.cummax()
-    drawdown = (prices - peak) / peak
-    return _to_scalar(drawdown.min())
+    drawdown = (peak - prices) / peak
+    return _to_scalar(drawdown.max())
 
 
 def calmar_ratio(returns: pd.Series, periods_per_year: int) -> float:
@@ -159,6 +203,6 @@ def calmar_ratio(returns: pd.Series, periods_per_year: int) -> float:
         float: Calmar ratio.
     """
     cagr = cagr_from_returns(returns, periods_per_year)
-    mdd = abs(max_drawdown(returns))
+    mdd = max_drawdown(returns)
     return cagr / mdd if mdd != 0 else np.nan
 
