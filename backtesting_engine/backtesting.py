@@ -139,10 +139,10 @@ class VBTBacktester:
         kelly   = bt.kelly_sizing()
         full    = bt.full_analysis()
     """
-
     def __init__(
         self,
         close,
+        volume=None,
         entries=None,
         exits=None,
         freq='D',
@@ -155,6 +155,7 @@ class VBTBacktester:
         """
         Args:
             close:        pd.Series or pd.DataFrame of close prices.
+            volume:       pd.DataFrame of volume (required for impact).
             entries:      pd.Series of signals (optional).
             exits:        pd.Series of signals (optional).
             freq:         Data frequency string ('D', '1H', '5T', etc.).
@@ -162,21 +163,22 @@ class VBTBacktester:
             commission:   Commission rate per trade (e.g. 0.001 = 0.1%).
             slippage:     Slippage rate per trade.
             lag_signals:  Shift signals 1 bar forward to prevent look-ahead bias.
-                          Standard for this project (next bar open).
             crypto_24_7:  Use 365-day calendar for annualisation.
         """
         def _squeeze(x):
             return x.squeeze() if isinstance(x, pd.DataFrame) else x
 
         self.close   = _squeeze(close).astype(float)
+        self.volume  = _squeeze(volume).astype(float) if volume is not None else None
         self.entries = _squeeze(entries).astype(bool) if entries is not None else None
         self.exits   = _squeeze(exits).astype(bool) if exits is not None else None
         self.freq       = freq
         self.init_cash  = init_cash
         self.commission = commission
         self.slippage   = slippage
+        self.lag_signals = lag_signals
         self.crypto_24_7 = crypto_24_7
-        self.weights     = None # Store target weights for WF analysis
+        self.weights     = None 
 
         # --- Resolve annualisation factor ---
         if crypto_24_7:
@@ -242,34 +244,57 @@ class VBTBacktester:
         Args:
             weights: pd.DataFrame of target weights (0.0 to 1.0).
         """
-        # Ensure both are DataFrames for multi-asset
         close = self.close.to_frame() if isinstance(self.close, pd.Series) else self.close
         
-        # Align columns first (only use assets present in both)
         common_assets = close.columns.intersection(weights.columns)
         if common_assets.empty:
-            # Fallback: if weights columns don't match close, maybe it's a single asset?
-            if isinstance(self.close, pd.Series) or self.close.shape[1] == 1:
-                weights_aligned = weights.reindex(close.index).fillna(0)
-            else:
-                raise ValueError("No common tickers found between weights and close price matrix.")
-        else:
-            close = close[common_assets].astype(float)
-            weights_aligned = weights[common_assets].reindex(close.index).fillna(0.0).astype(float)
+            raise ValueError("No common tickers found between weights and close price matrix.")
+            
+        close = close[common_assets].astype(float)
+        weights_aligned = weights[common_assets].reindex(close.index).fillna(0.0).astype(float)
         
+        # 1. STRICT T+1 EXECUTION LAG
+        if self.lag_signals:
+            weights_aligned = weights_aligned.shift(1).fillna(0.0)
+
         self.weights = weights_aligned 
-        self.close = close # Ensure prices and weights share identical structure for sub-period slicing
-        
+        self.close = close
+
+        # 2. ALMGREN-CHRISS MARKET IMPACT MATRIX
+        if self.volume is not None and not self.volume.empty:
+            vol_aligned = self.volume[common_assets].reindex(close.index).fillna(0.0)
+            
+            # Calculate weight deltas to approximate trade size
+            weight_deltas = weights_aligned.diff().fillna(weights_aligned)
+            approx_trade_value = weight_deltas.abs() * self.init_cash
+            approx_shares = approx_trade_value / close
+            
+            # Calculate daily volatility (20-day rolling)
+            daily_vol = close.pct_change().rolling(20).std().fillna(0.01)
+            
+            # Impact = Volatility * sqrt(Shares / Volume) * Participation Rate (gamma)
+            gamma = 0.1
+            ratio = (approx_shares / vol_aligned.replace(0, np.nan)).fillna(0)
+            
+            # Add base slippage to the dynamic impact
+            slippage_matrix = self.slippage + (daily_vol * np.sqrt(ratio) * gamma)
+            
+            # Cap extreme slippage at 5% to prevent data errors from blowing up the account
+            slippage_matrix = np.clip(slippage_matrix, self.slippage, 0.05)
+        else:
+            # Fallback to static slippage if no volume data is provided
+            slippage_matrix = self.slippage
+
         self._portfolio = vbt.Portfolio.from_orders(
             close=close,
             size=weights_aligned,
             size_type='target_percent',
             init_cash=self.init_cash,
             fees=self.commission,
-            slippage=self.slippage,
+            slippage=slippage_matrix,
             freq=self.freq,
             cash_sharing=True,
-            group_by=True, # Enable grouping for portfolio-level stats
+            group_by=True, 
         )
         return self._post_run(print_stats)
 
@@ -519,7 +544,7 @@ class VBTBacktester:
     # =========================================================================
     # 4. WALK-FORWARD ANALYSIS
     # =========================================================================
-    def walk_forward(self, n_splits=5, mode='rolling', print_report=True):
+    def walk_forward(self, n_splits=5, mode='rolling', strategy_func=None, print_report=True):
         """
         Rolling walk-forward analysis across n_splits independent windows.
 
@@ -537,52 +562,80 @@ class VBTBacktester:
         window_size = n // n_splits
         windows     = []
 
+        is_true_cv = strategy_func is not None
+
         for i in range(n_splits):
             test_start = i * window_size
             test_end   = min((i + 1) * window_size, n)
-            sl = slice(test_start, test_end)
-            t_close   = self.close.iloc[sl]
-            t_entries = self.entries.iloc[sl] if self.entries is not None else None
-            t_exits   = self.exits.iloc[sl] if self.exits is not None else None
-            t_weights = self.weights.iloc[sl] if self.weights is not None else None
-
+            
+            # Define training window based on mode
+            train_start = 0 if mode == 'anchored' else max(0, test_start - window_size)
+            
+            test_slice = slice(test_start, test_end)
+            train_slice = slice(train_start, test_start)
+            
+            t_close = self.close.iloc[test_slice]
+            
             if len(t_close) < 5:
                 continue
 
             try:
-                if t_weights is not None:
+                if is_true_cv:
+                    # --- TRUE CROSS-VALIDATION ---
+                    train_data = self.close.iloc[train_slice]
+                    
+                    # The strategy_func must accept training data and return target weights for the test period
+                    t_weights = strategy_func(train_data, t_close)
+                    
+                    # Ensure alignment and shifting within the CV step
+                    if self.lag_signals:
+                        t_weights = t_weights.shift(1).fillna(0.0)
+                        
                     pf = vbt.Portfolio.from_orders(
                         close=t_close,
                         size=t_weights,
                         size_type='target_percent',
                         init_cash=self.init_cash,
                         fees=self.commission,
-                        slippage=self.slippage,
+                        slippage=self.slippage, # Can pass matrix here too if volume is sliced
                         freq=self.freq,
                         cash_sharing=True,
                         group_by=True
                     )
                 else:
-                    pf = vbt.Portfolio.from_signals(
-                        close=t_close,
-                        entries=t_entries,
-                        exits=t_exits,
-                        init_cash=self.init_cash,
-                        fees=self.commission,
-                        slippage=self.slippage,
-                        freq=self.freq,
-                    )
+                    # --- PASSIVE SUB-PERIOD ANALYSIS ---
+                    t_weights = self.weights.iloc[test_slice] if self.weights is not None else None
+                    if t_weights is not None:
+                        pf = vbt.Portfolio.from_orders(
+                            close=t_close,
+                            size=t_weights,
+                            size_type='target_percent',
+                            init_cash=self.init_cash,
+                            fees=self.commission,
+                            slippage=self.slippage,
+                            freq=self.freq,
+                            cash_sharing=True,
+                            group_by=True
+                        )
+                    else:
+                        t_entries = self.entries.iloc[test_slice] if self.entries is not None else None
+                        t_exits   = self.exits.iloc[test_slice] if self.exits is not None else None
+                        pf = vbt.Portfolio.from_signals(
+                            close=t_close, entries=t_entries, exits=t_exits,
+                            init_cash=self.init_cash, fees=self.commission,
+                            slippage=self.slippage, freq=self.freq,
+                        )
+
                 sharpe = float(pf.sharpe_ratio())
                 windows.append({
                     'window':       i + 1,
-                    'test_period':  (f"{t_close.index[0].strftime('%Y-%m-%d')} → "
-                                     f"{t_close.index[-1].strftime('%Y-%m-%d')}"),
+                    'test_period':  f"{t_close.index[0].strftime('%Y-%m-%d')} → {t_close.index[-1].strftime('%Y-%m-%d')}",
                     'total_return': float(pf.total_return()),
                     'sharpe':       sharpe if np.isfinite(sharpe) else 0.0,
                     'max_drawdown': float(pf.max_drawdown()),
                     'n_trades':     int(pf.trades.count()),
                 })
-            except Exception:
+            except Exception as e:
                 continue
 
         if not windows:
@@ -601,9 +654,10 @@ class VBTBacktester:
             'profitable_windows': sum(1 for w in windows if w['total_return'] > 0),
         }
 
-        if print_report:
+        if print_report and windows:
+            title = "True Walk-Forward Validation" if is_true_cv else "Passive Sub-period Analysis"
             print("\n" + "=" * 60)
-            print(f"  🔄 Sub-period Analysis ({len(windows)} independent windows)")
+            print(f"  🔄 {title} ({len(windows)} independent windows)")
             print("=" * 60)
             wf_df = pd.DataFrame(windows)
             wf_df['total_return'] = wf_df['total_return'].map(lambda x: f"{x * 100:.2f}%")
@@ -620,7 +674,7 @@ class VBTBacktester:
             print(f"  Worst Drawdown:       {agg['worst_drawdown'] * 100:.2f}%")
             print(f"  Profitable Windows:   {agg['profitable_windows']}/{agg['n_windows']}")
 
-        return {'windows': windows, 'aggregated': agg}
+        return {'windows': windows, 'aggregated': agg if 'agg' in locals() else {}}
 
     # =========================================================================
     # 4b. COMBINATORIAL PURGED CROSS-VALIDATION (CPCV)

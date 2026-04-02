@@ -29,6 +29,7 @@ from backtesting_engine.backtesting import VBTBacktester
 from config.settings import CASH, COMMISSION
 from portfolio_construction import kpi
 from scipy.stats import zscore
+from pit_universe import PointInTimeUniverse
 
 from dataclasses import dataclass, field
 import logging
@@ -43,14 +44,14 @@ logger = logging.getLogger(__name__)
 # ============================================================
 @dataclass(frozen=True)
 class StrategyConfig:
-    risk_free_rate: float = 0.00
+    risk_free_rate: float = 0.03
     min_backtest_months: int = 24
     cash: float = CASH
     commission: float = 0.001  # 10 bps
     slippage: float = 0.0005   # 5 bps
     order_book_min_delta: float = 0.005
     rebal_freq: int = 1
-    min_weight_delta: float = 0.0075  # 0.75% Turnover filter
+    min_weight_delta: float = 0.02    # 2.0% Turnover filter
     min_score_count: int = 5
     target_vol: float = 0.12
     vol_spike_threshold: float = 2.0
@@ -154,7 +155,6 @@ def compute_6_1(prices: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_3_1(prices: pd.DataFrame) -> pd.DataFrame:
-    """3-1 momentum: 3-month (approx) log-return used for short-term acceleration."""
     return (prices.shift(1) / prices.shift(4) - 1)
 
 
@@ -205,22 +205,23 @@ def compute_scores_cs(
     zs = z(s)         # Trend Stability
     zv = z(1.0 / (v + 1e-12)) # Vol Inversion
     zd = z(-d)        # Drawdown Penalty (negative of DD)
+    acc = z(m3 - m6)  # Momentum Acceleration (change in trend)
     
-    # 3. Composite Alpha Score (The Brain)
-    composite = (0.35 * zm) + (0.30 * zs) + (0.20 * zv) + (0.15 * zd)
+    # 3. Composite Alpha Score (The Alpha Engine)
+    # Concentration on trend quality and acceleration
+    composite = (0.30 * zm) + (0.25 * zs) + (0.15 * zv) + (0.10 * zd) + (0.20 * acc)
     
     # 4. Regime-Aware Macro Overlay
     if regime_type == "high_vol":
         composite = composite - 0.25 * z(v) # Aggressive vol penalty in stress
         
-    # 5. Select Tightly (High Conviction Floor)
-    # Z > -0.3 ensures we only pick assets with above-average quality characteristics
-    selected = composite[composite > -0.3]
-    if selected.empty:
+    # 5. Selection Filtering (Handled in loop for tri-mode flexibility)
+    if composite.empty:
         return {}
         
     # 6. Apply final convexity power (Z^power)
-    base = selected - selected.min() + 1e-6
+    # Concentrates weights into best names
+    base = composite - composite.min() + 1e-6
     convex_scores = base ** power
     
     return convex_scores.to_dict()
@@ -232,20 +233,24 @@ def select_top_robust(scores: dict, universe: UniverseMetadata, n: int = 15):
     return [t for t, _ in ranked[:n]]
 
 
-def compute_weights(selected: list, returns_window: pd.DataFrame):
-    """Inverse volatility weighting for selected tickers."""
-    if not selected or returns_window.empty:
+def compute_weights(selected: list, scores: dict, temperature: float = 0.5):
+    """
+    Conviction-based Softmax Weighting.
+    Concentrates capital into the highest alpha scores with numeric stability.
+    """
+    if not selected or not scores:
         return {}
         
-    vols = returns_window[selected].std()
-    # Handle assets with zero variance or all-NaN
-    vols = vols.fillna(vols.mean()).fillna(0.1) # Fallback to 10% monthly vol if unknown
-    vols = vols.replace(0, vols.mean() if vols.mean() > 0 else 0.1)
+    # Extract alpha scores for selected tickers
+    scores_arr = np.array([scores.get(t, 0.0) for t in selected])
+    
+    # Numeric stable softmax with temperature control
+    x = scores_arr / temperature
+    x = x - np.max(x) # Shift for stability
+    w = np.exp(x)
+    weights_arr = w / w.sum()
 
-    inv_vol = 1 / (vols + 1e-12)
-    weights = inv_vol / inv_vol.sum()
-
-    return weights.fillna(0.0).to_dict()
+    return dict(zip(selected, weights_arr))
 
 
 def compute_full_metrics(strat: pd.Series, bench: pd.Series, config: StrategyConfig = CONFIG) -> dict:
@@ -324,7 +329,7 @@ def _handle_pnl_and_weights(
     return pnl, updated_weights
 
 
-def run_strategy(prices: pd.DataFrame, mom_12_1: pd.DataFrame, universe: UniverseMetadata, config: StrategyConfig = CONFIG):
+def run_strategy(prices: pd.DataFrame, mom_12_1: pd.DataFrame, universe: UniverseMetadata, config: StrategyConfig = CONFIG, pit_engine=None):
     """
     Main strategy loop with institutional-grade adaptive risk controls.
     - Continuous regime score (inverse-vol weighted)
@@ -338,12 +343,13 @@ def run_strategy(prices: pd.DataFrame, mom_12_1: pd.DataFrame, universe: Univers
     spy_rets = spy_prices.pct_change() if spy_prices is not None else None
     
     # Adaptive Threshold Components
-    spy_vol_3m = spy_rets.rolling(63).std() * np.sqrt(252).astype(float) if spy_rets is not None else None
+    spy_vol_3m = spy_rets.rolling(3).std() * np.sqrt(12).astype(float) if spy_rets is not None else None
     if spy_vol_3m is not None:
         # Floor vol at 10th percentile to prevent inverse-vol explosion
         spy_vol_3m = np.maximum(spy_vol_3m, spy_vol_3m.quantile(0.1))
         
-    spy_ma_3m = spy_prices.rolling(63).mean() if spy_prices is not None else None
+    spy_ma_3m = spy_prices.rolling(3).mean() if spy_prices is not None else None
+    spy_ma_6m = spy_prices.rolling(6).mean() if spy_prices is not None else None
     
     # 1. Prepare Returns & Signals
     returns = prices.pct_change().dropna(how='all')
@@ -360,7 +366,7 @@ def run_strategy(prices: pd.DataFrame, mom_12_1: pd.DataFrame, universe: Univers
     regime_score_buffer = []
 
     total_turnover = 0.0
-    total_txn_cost = 0.0
+    txn_costs_series = pd.Series(0.0, index=returns.index)
 
     for i in range(len(returns)):
         date = returns.index[i]
@@ -396,7 +402,7 @@ def run_strategy(prices: pd.DataFrame, mom_12_1: pd.DataFrame, universe: Univers
         regime_score_buffer.append(regime_score)
         if len(regime_score_buffer) > 12:
             s_buf_1y = np.array(regime_score_buffer[-12:])
-            s_buf_3y = np.array(regime_score_buffer[-max(len(regime_score_buffer), 36):])
+            s_buf_3y = np.array(regime_score_buffer[-36:])
             
             # Blended distribution (70% 1y / 30% 3y)
             mean_blended = 0.7 * s_buf_1y.mean() + 0.3 * s_buf_3y.mean()
@@ -426,14 +432,29 @@ def run_strategy(prices: pd.DataFrame, mom_12_1: pd.DataFrame, universe: Univers
         prev_shock_factor = shock_factor
         shock_suppression = max(0.5, (1.0 - 0.5 * shock_factor)) # Proportional reduction (50% max cut)
 
-        # F. EXPOSURE & CONVEX SCALING (RESTORED PARTICIPATION)
+        # F. EXPOSURE & CONVEX SCALING (TRI-MODE REGIME ENGINE)
         base_exposure = 0.75
-        # Non-linear risk response: regime_strength ** 1.2 (slightly smoother for alpha)
-        regime_cap = base_exposure * regime_strength
+        # Adaptive base exposure (50% floor + 50% regime)
+        regime_cap = base_exposure * (0.5 + 0.5 * regime_strength)
         
-        # Final exposure calculation
-        target_exposure = regime_cap * shock_suppression
-        target_exposure = base_exposure * (0.5 + 0.5 * regime_strength) * shock_suppression # 30% floor participation
+        if regime_strength < 0.4:
+             # mode 1: DEFENSIVE (Low trend quality, preserve capital)
+             n_select = 10
+             score_threshold = 0.2
+             target_exposure = regime_cap * 0.6
+        elif regime_strength < 0.7:
+             # mode 2: NEUTRAL (Stable conditions, balanced breadth)
+             n_select = 20
+             score_threshold = 0.0
+             target_exposure = regime_cap
+        else:
+             # mode 3: AGGRESSIVE (High acceleration, high conviction)
+             n_select = 15
+             score_threshold = -0.2
+             target_exposure = min(regime_cap * 1.2, 1.0) # Capped at 1.0 (No Leverage)
+
+        # Apply shock suppression overlay
+        target_exposure = target_exposure * shock_suppression
 
         # G. ASSET SELECTION (INSTITUTIONAL ALPHA BRAIN)
         vol = returns.iloc[max(0, i - 12):i].std()
@@ -453,6 +474,21 @@ def run_strategy(prices: pd.DataFrame, mom_12_1: pd.DataFrame, universe: Univers
         m6_row  = prices.iloc[i] / prices.iloc[i-6] - 1
         m12_row = prices.iloc[i] / prices.iloc[i-12] - 1
         
+        # --- NEW: POINT-IN-TIME FILTERING ---
+        if pit_engine:
+            valid_tickers = pit_engine.get_universe_for_date(date.to_timestamp())
+            # Intersection of what was officially in the index AND what we actually have data for
+            active_tickers = [t for t in valid_tickers if t in returns.columns]
+            
+            m1_row = m1_row.loc[active_tickers]
+            m3_row = m3_row.loc[active_tickers]
+            m6_row = m6_row.loc[active_tickers]
+            m12_row = m12_row.loc[active_tickers]
+            vol = vol.loc[active_tickers]
+            stability = stability.loc[active_tickers]
+            drawdown = drawdown.loc[active_tickers]
+        # ------------------------------------
+
         regime_type = "high_vol" if spy_vol_3m.iloc[i] > 0.25 else "normal"
         power = 1.2 + (0.3 * regime_strength) # Signal convexity
         
@@ -471,17 +507,26 @@ def run_strategy(prices: pd.DataFrame, mom_12_1: pd.DataFrame, universe: Univers
         if not scores:
             new_weights = {} # Only move to cash if no data
         else:
-            n_select = 6 if regime_type == "high_vol" else 12
-            # Use top selection anyway to maintain breadth
-            selected = select_top_robust(scores, universe, n=max(5, n_select))
-            raw_weights = compute_weights(selected, returns.iloc[max(0, i-12):i])
+            # 1. First-Stage Filter: Regime-specific score threshold
+            valid_scores = {k: v for k, v in scores.items() if v >= score_threshold}
             
-            # H. STRICT NORMALIZATION
-            total_raw_w = sum(raw_weights.values())
-            if total_raw_w > 0:
-                new_weights = {t: (w / total_raw_w) * target_exposure for t, w in raw_weights.items()}
-            else:
+            if not valid_scores:
                 new_weights = {}
+            else:
+                # 2. Second-Stage Filter: Top 30% Cutoff (70th Percentile)
+                cutoff = np.percentile(list(valid_scores.values()), 70)
+                final_scores = {k: v for k, v in valid_scores.items() if v >= cutoff}
+                
+                # 3. Final Selection (N-selection for breadth)
+                selected = select_top_robust(final_scores, universe, n=n_select)
+                raw_weights = compute_weights(selected, final_scores, temperature=0.5)
+                
+                # H. STRICT NORMALIZATION
+                total_raw_w = sum(raw_weights.values())
+                if total_raw_w > 0:
+                    new_weights = {t: (w / total_raw_w) * target_exposure for t, w in raw_weights.items()}
+                else:
+                    new_weights = {}
 
         # I. DATA VALIDATION FAIL-SAFE
         nw_array = np.array(list(new_weights.values()))
@@ -497,19 +542,29 @@ def run_strategy(prices: pd.DataFrame, mom_12_1: pd.DataFrame, universe: Univers
             new_w = new_weights.get(t, 0.0)
             if abs(new_w - old_w) < config.min_weight_delta:
                 potential_weights[t] = old_w
+        
+        # Base filter for dust weights
         new_weights = {t: w for t, w in potential_weights.items() if w > 0.001}
+
+        # STRICT RE-NORMALIZATION
+        current_exposure = sum(new_weights.values())
+        # If the turnover filter pushed us over our target exposure, scale everything back down proportionately.
+        if current_exposure > target_exposure:
+            scale = target_exposure / current_exposure
+            new_weights = {t: w * scale for t, w in new_weights.items()}
 
         # K. REBALANCE LOGGING & COSTING
         # Calculate Turnover-Scaled Costs (10 bps fees + 5 bps slippage = 15 bps)
         turnover = sum(abs(new_weights.get(t, 0) - prev_weights.get(t, 0)) for t in all_tickers)
         txn_cost = turnover * 0.0015
         total_turnover += turnover
-        total_txn_cost += txn_cost
+        txn_costs_series[date] = txn_cost
         
         # Order Book
         def _get_ob_row(ticker, action, weight):
+            sector = universe.universe_with_sectors.get(ticker, "UNKNOWN") # Handled gracefully
             return {
-                "Date": str(date), "Ticker": ticker, "Sector": universe.universe_with_sectors.get(ticker, "?"),
+                "Date": str(date), "Ticker": ticker, "Sector": sector,
                 "Action": action, "Weight_%": round(weight * 100, 2),
                 "Mom_12_1_%": round(mom_12_1.iloc[i].get(ticker, 0) * 100, 2),
                 "Price": round(float(prices[ticker].iloc[i]), 2) if ticker in prices.columns else None,
@@ -537,10 +592,22 @@ def run_strategy(prices: pd.DataFrame, mom_12_1: pd.DataFrame, universe: Univers
     logger.info(f"  Target Accuracy Check (T+1 Lagged): {len(weights_df)} periods")
     logger.info(f"  Avg Exposure (%): {(weights_df.sum(axis=1).mean() * 100):.2f}%")
     logger.info(f"  Total strategy turnover: {total_turnover:.2f}")
-    logger.info(f"  Total strategy costs: {total_txn_cost*100:.2f}%")
+    logger.info(f"  Total strategy costs: {txn_costs_series.sum()*100:.2f}%")
 
-    # Re-extract monthly returns for internal stats (approximate since costs are already added)
-    monthly_rets = returns.multiply(weights_df).sum(axis=1) - (total_txn_cost / len(returns))
+    # M. SYNTHETIC CASH YIELD (Approximating ~3% annual on uninvested capital)
+    cash_yield_annual = 0.03
+    cash_yield_monthly = (1 + cash_yield_annual) ** (1/12) - 1
+    
+    # Calculate how much of the portfolio was in cash each month (using lagged weights_df)
+    invested_capital = weights_df.sum(axis=1)
+    cash_weights = np.clip(1.0 - invested_capital, 0.0, 1.0)
+    
+    # Generate the return stream for the cash portion
+    cash_returns = cash_weights * cash_yield_monthly
+
+    # Re-extract monthly returns for internal stats (accurately subtracting costs per period)
+    # Add the cash returns to the equity returns
+    monthly_rets = returns.multiply(weights_df).sum(axis=1) + cash_returns - txn_costs_series.shift(1).fillna(0.0)
 
     return monthly_rets, pd.DataFrame(order_book_rows), weights_history
 
@@ -864,22 +931,50 @@ def main(config: StrategyConfig = CONFIG, universe: UniverseMetadata = UNIVERSE)
     spy_start = END_DATE - dt.timedelta(days=365 * 14)
     spy_raw = yf.download("SPY", start=spy_start, end=END_DATE, interval="1mo", auto_adjust=True, progress=False)
     spy_price = _extract_close(spy_raw)
-    spy_rets = _to_period_index(np.log(spy_price / spy_price.shift(1)).dropna())
+    spy_price = _to_period_index(spy_price).groupby(level=0).last()
     
-    # spy_monthly_prices = _resample_spy_to_monthly(spy_daily_close) (Not used in simple strategy)
-
-    # 2. Universe Data
-    logger.info("  Fetching universe data...")
-    from data_ingestion.data_store import load_universe_data, update_universe_data
-    update_universe_data(universe.tickers, start=START_DATE, end=END_DATE, interval='1mo')
-    ohlcv = load_universe_data(universe.tickers, interval='1mo')
+    spy_rets = spy_price.pct_change().dropna()
+    
+    # 2. Universe Data (Cache-Aware)
+    from data_ingestion.data_store import load_universe_data, update_universe_data, DATA_DIR
+    import pickle
+    
+    CACHE_FILE = DATA_DIR / "pit_cache.pkl"
+    
+    if CACHE_FILE.exists():
+        logger.info(f"  📂 PiT cache found. Skipping download phase...")
+        with open(CACHE_FILE, 'rb') as f:
+            cache_data = pickle.load(f)
+            pit_engine = cache_data.get('pit_engine')
+            master_tickers_list = cache_data.get('master_tickers_list')
+            cache_ts = cache_data.get('timestamp')
+            logger.info(f"  PiT metadata loaded from {cache_ts.strftime('%Y-%m-%d %H:%M')}")
+    else:
+        logger.info("  ⚠️  PiT cache not found. Re-scraping Wikipedia (this may be slow)...")
+        pit_engine = PointInTimeUniverse()
+        master_tickers = set(pit_engine.current_sp500)
+        for t in pit_engine.changes_df['Removed_Ticker']:
+            if t != 'nan':
+                master_tickers.add(t)
+        master_tickers_list = list(master_tickers)
+        
+        logger.info(f"  Total historical universe size: {len(master_tickers_list)} tickers")
+        logger.info("  Fetching universe data...")
+        update_universe_data(master_tickers_list, start=START_DATE, end=END_DATE, interval='1mo')
+    
+    ohlcv = load_universe_data(master_tickers_list, interval='1mo')
     prices = build_prices(ohlcv)
+    prices.index = pd.PeriodIndex(prices.index, freq='M')
+    prices = prices.groupby(level=0).last()
+    
     returns = compute_returns(prices).dropna(how='all')
+    
+    # Final alignment
+    returns.index = pd.PeriodIndex(returns.index, freq='M')
+    returns = returns.groupby(level=0).last()
     prices = prices.reindex(returns.index)
 
     # Filtering
-    returns.index = pd.PeriodIndex(returns.index, freq='M')
-    prices.index = pd.PeriodIndex(prices.index, freq='M')
     good_tickers = prices.notna().mean()[lambda x: x > 0.80].index
     prices, returns = prices[good_tickers], returns[good_tickers]
 
@@ -901,7 +996,8 @@ def main(config: StrategyConfig = CONFIG, universe: UniverseMetadata = UNIVERSE)
         prices=prices, 
         mom_12_1=mom_12_1, 
         universe=universe, 
-        config=config
+        config=config,
+        pit_engine=pit_engine
     )
 
     # 4. VBT Backtest (T+1 Lagged Weights)
@@ -944,8 +1040,9 @@ def main(config: StrategyConfig = CONFIG, universe: UniverseMetadata = UNIVERSE)
     bt.kelly_sizing(print_report=True)
 
     # 5. Final Reporting
-    spy_simple_aligned = (np.exp(spy_rets) - 1).reindex(strategy_returns.index, method='ffill').fillna(0)
-    strat_simple_aligned = np.exp(strategy_returns) - 1
+    spy_simple_aligned = spy_rets.reindex(strategy_returns.index, method='ffill').fillna(0)
+    # The Strategy output is already simple returns, so we just align it
+    strat_simple_aligned = strategy_returns.reindex(spy_simple_aligned.index).fillna(0.0)
     
     metrics = compute_full_metrics(strat_simple_aligned, spy_simple_aligned, config)
     spy_metrics = compute_full_metrics(spy_simple_aligned, spy_simple_aligned, config)
@@ -958,13 +1055,17 @@ def main(config: StrategyConfig = CONFIG, universe: UniverseMetadata = UNIVERSE)
         ho = strategy_returns.dropna().iloc[-24:]
         if len(ho) >= 6:
             spy_ho = spy_rets.reindex(ho.index, method='ffill').fillna(0)
-            ho_m = compute_full_metrics((np.exp(ho) - 1), (np.exp(spy_ho) - 1), config)
+            # Both strategy 'ho' and SPY 'spy_ho' are now simple returns
+            ho_m = compute_full_metrics(ho, spy_ho, config)
             logger.info("\n  🔒 Frozen Holdout (last 24 months) Metrics")
             for k, v in ho_m.items(): logger.info(f"    {k}: {v}")
     except Exception: pass
 
     logger.info("\n  Building dashboard...")
-    fig = build_dashboard(strategy_returns, order_book_df, weights_history, spy_rets, metrics)
+    # SPY rets are already simple returns (pct_change)
+    spy_simple = spy_rets
+    
+    fig = build_dashboard(strategy_returns, order_book_df, weights_history, spy_simple, metrics)
     dash_path = REPORTS_DIR / "portfolio_dashboard.html"
     fig.write_html(str(dash_path), include_plotlyjs="cdn", full_html=True)
     logger.info(f"  ✅ Dashboard saved  → {dash_path}\n")

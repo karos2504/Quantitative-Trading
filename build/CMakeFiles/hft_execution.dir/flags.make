@@ -4,7 +4,7 @@
 # compile CXX with /usr/bin/c++
 CXX_DEFINES = -Dhft_execution_EXPORTS
 
-CXX_INCLUDES = -I"/Users/karos/Documents/Quantitative Research/execution_core/include" -isystem /opt/homebrew/include -isystem /opt/homebrew/opt/python@3.14/Frameworks/Python.framework/Versions/3.14/include/python3.14
+CXX_INCLUDES = -I"/Users/karos/Documents/Quantitative Research/execution_core/include" -isystem /opt/homebrew/opt/python@3.14/Frameworks/Python.framework/Versions/3.14/include/python3.14 -isystem /opt/homebrew/include
 
 CXX_FLAGSarm64 = -g -std=gnu++17 -arch arm64 -fPIC -fvisibility=hidden -O3 -march=native -funroll-loops
 
