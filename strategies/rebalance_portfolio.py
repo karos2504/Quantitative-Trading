@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 # ============================================================
 @dataclass(frozen=True)
 class StrategyConfig:
-    risk_free_rate: float = 0.03
+    risk_free_rate: float = 0.07
     min_backtest_months: int = 24
     cash: float = CASH
     commission: float = 0.001  # 10 bps
@@ -274,9 +274,10 @@ def compute_full_metrics(strat: pd.Series, bench: pd.Series, config: StrategyCon
     # Add Alpha, Beta, Correlation
     try:
         st_arr, bh_arr = strat.values, bench_aligned.values
+        risk_free_rate=config.risk_free_rate
         cov_mat = np.cov(st_arr, bh_arr)
-        beta = cov_mat[0, 1] / cov_mat[1, 1] if cov_mat[1, 1] > 0 else 0.0
-        alpha = (st_arr.mean() - beta * bh_arr.mean()) * 12
+        beta = cov_mat[0, 1] / np.var(bh_arr) if np.var(bh_arr) > 0 else 0.0
+        alpha = (st_arr.mean() - risk_free_rate + beta * (bh_arr.mean() - risk_free_rate)) * 12
         corr = float(np.corrcoef(st_arr, bh_arr)[0, 1])
     except Exception:
         alpha, beta, corr = 0.0, 0.0, 0.0
