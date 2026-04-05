@@ -3,105 +3,105 @@
 ## 📊 Performance Summary
 | Metric | Value |
 | :--- | :--- |
-| Start | 2023-05-17 13:30:00 |
-| End | 2026-03-20 19:30:00 |
-| Period | 206 days 06:00:00 |
+| Start | 2023-05-01 17:30:00+00:00 |
+| End | 2026-03-20 19:30:00+00:00 |
+| Period | 209 days 14:00:00 |
 | Start Value | 100000.0000 |
-| End Value | 160604.5867 |
-| Total Return [%] | 60.6046 |
-| Benchmark Return [%] | 147.5174 |
+| End Value | 224711.6146 |
+| Total Return [%] | 124.7116 |
+| Benchmark Return [%] | 145.1564 |
 | Max Gross Exposure [%] | 100.0000 |
-| Total Fees Paid | 6319.6171 |
-| Max Drawdown [%] | 28.6051 |
-| Max Drawdown Duration | 55 days 15:00:00 |
-| Total Trades | 19 |
-| Total Closed Trades | 19 |
+| Total Fees Paid | 10042.1218 |
+| Max Drawdown [%] | 22.1193 |
+| Max Drawdown Duration | 43 days 00:00:00 |
+| Total Trades | 28 |
+| Total Closed Trades | 28 |
 | Total Open Trades | 0 |
 | Open Trade PnL | 0.0000 |
-| Win Rate [%] | 47.3684 |
-| Best Trade [%] | 46.1120 |
-| Worst Trade [%] | -10.0315 |
-| Avg Winning Trade [%] | 11.4534 |
-| Avg Losing Trade [%] | -4.3013 |
-| Avg Winning Trade Duration | 9 days 23:06:40 |
-| Avg Losing Trade Duration | 4 days 11:54:00 |
-| Profit Factor | 1.7722 |
-| Expectancy | 3189.7151 |
-| Sharpe Ratio | 1.6762 |
-| Calmar Ratio | 4.5892 |
-| Omega Ratio | 1.0820 |
-| Sortino Ratio | 2.7112 |
-| Sortino Ratio | 0.4598 |
-| Calmar Ratio | 0.0853 |
-| CVaR (95%) | -1.34% |
+| Win Rate [%] | 60.7143 |
+| Best Trade [%] | 33.1447 |
+| Worst Trade [%] | -8.5529 |
+| Avg Winning Trade [%] | 7.8433 |
+| Avg Losing Trade [%] | -3.7311 |
+| Avg Winning Trade Duration | 4 days 02:38:49.411764705 |
+| Avg Losing Trade Duration | 2 days 17:32:43.636363636 |
+| Profit Factor | 2.3830 |
+| Expectancy | 4453.9862 |
+| Sharpe Ratio | 2.7431 |
+| Calmar Ratio | 13.9974 |
+| Omega Ratio | 1.1704 |
+| Sortino Ratio | 4.9769 |
+| Sortino Ratio | 0.8441 |
+| Calmar Ratio | 0.1872 |
+| CVaR (95%) | -1.21% |
 
 ## 📈 Benchmark Comparison
-- **Strategy Return:** 60.60%
-- **Benchmark Return:** 147.27%
-- **Alpha (ann.):** -0.0017
-- **Beta:** 0.5587
-- **Information Ratio:** -0.2852
+- **Strategy Return:** 124.71%
+- **Benchmark Return:** 144.91%
+- **Alpha (ann.):** 0.0181
+- **Beta:** 0.4978
+- **Information Ratio:** -0.0934
 
 ## 🎲 Monte Carlo Analysis
-- **P-value (Return):** 0.4860
-- **P-value (Sharpe):** 0.4780
-- **P-value (vs Random):** 0.4880
+- **P-value (Return):** 0.5380
+- **P-value (Sharpe):** 0.5440
+- **P-value (vs Random):** 0.1140
 
 ## 🔄 Sub-period Analysis
 | Window | Period | Return | Sharpe | Max DD |
 | :--- | :--- | :--- | :--- | :--- |
-| 1 | 2023-05-17 → 2024-01-31 | 38.85% | 4.4047 | -15.30% |
-| 2 | 2024-01-31 → 2024-10-15 | 6.16% | 1.0432 | -17.90% |
-| 3 | 2024-10-15 → 2025-07-02 | 22.71% | 3.1688 | -9.06% |
-| 4 | 2025-07-03 → 2026-03-20 | -22.91% | -3.0350 | -24.80% |
+| 1 | 2023-05-01 → 2024-01-19 | 28.73% | 4.4024 | -10.01% |
+| 2 | 2024-01-19 → 2024-10-07 | 60.69% | 4.4612 | -15.83% |
+| 3 | 2024-10-07 → 2025-06-30 | 24.07% | 3.0626 | -21.57% |
+| 4 | 2025-06-30 → 2026-03-20 | -10.46% | -1.6240 | -22.12% |
 
 ## 🔥 Stress Test Performance
 | Scenario | Stressed Return | Max DD | Status |
 | :--- | :--- | :--- | :--- |
-| Global Financial Crisis 2008 | 21.14% | -52.39% | Survived |
-| COVID-19 Crash 2020 | 35.90% | -31.80% | Survived |
-| Dot-com Bubble Burst 2000–2002 | 95.38% | -53.65% | Survived |
-| Black Monday 1987 | 52.95% | -28.61% | Survived |
-| Russian Default / LTCM 1998 | 11.71% | -42.90% | Survived |
-| Crypto Bear Market 2022 | -55.40% | -82.65% | Survived |
+| Global Financial Crisis 2008 | 207.16% | 43.58% | Survived |
+| COVID-19 Crash 2020 | 68.42% | 41.63% | Survived |
+| Dot-com Bubble Burst 2000–2002 | 162.41% | 56.71% | Survived |
+| Black Monday 1987 | 120.37% | 29.04% | Survived |
+| Russian Default / LTCM 1998 | 39.10% | 49.87% | Survived |
+| Crypto Bear Market 2022 | -21.29% | 82.82% | Survived |
 
 ## 🏦 Trade-Level Analysis
-- **Total Trades:** 19
-- **Win Rate:** 47.37%
-- **Profit Factor:** 1.77
-- **Expectancy:** 3189.72
+- **Total Trades:** 28
+- **Win Rate:** 60.71%
+- **Profit Factor:** 2.38
+- **Expectancy:** 4453.99
 
 ## 🛡️ Deflated Sharpe Ratio
-- **Observed Sharpe:** 0.2843
-- **Expected Max Sharpe:** 0.2682
-- **P-value:** 0.4704
+- **Observed Sharpe:** 0.4653
+- **Expected Max Sharpe:** 0.2460
+- **P-value:** 0.1347
 - **Conclusion:** Possibly Luck
 
 ## 🌡️ Regime-Conditional Performance
 ### Volatility Regimes
 | Regime | Return | Sharpe | Max DD | N |
 | :--- | :--- | :--- | :--- | :--- |
-| Low Vol | -0.51% | -0.2637 | -5.07% | 1627 |
-| Med Vol | -0.91% | -0.1209 | -23.92% | 1677 |
-| High Vol | 10.38% | 0.6428 | -18.27% | 1627 |
+| Low Vol | 0.00% | 0.0000 | 0.00% | 2085 |
+| Med Vol | 4.26% | 0.7017 | 10.59% | 1272 |
+| High Vol | 10.43% | 0.6504 | 21.74% | 1654 |
 
 ### Trend Regimes
 | Regime | Return | Sharpe | Max DD | N |
 | :--- | :--- | :--- | :--- | :--- |
-| Bull | 20.06% | 1.7719 | -7.54% | 2797 |
-| Bear | -19.31% | -2.2307 | -82.35% | 2153 |
+| Bull | 17.89% | 1.6568 | 6.92% | 2867 |
+| Bear | -13.22% | -1.6800 | 69.67% | 2163 |
 
 ## ⚖️ Extended Risk Metrics
-- **Omega Ratio:** 1.0820
-- **Tail Ratio:** 1.0138
-- **Gain-to-Pain:** 0.0820
-- **Ulcer Index:** 11.9299
+- **Omega Ratio:** 1.1704
+- **Tail Ratio:** 1.0590
+- **Gain-to-Pain:** 0.1704
+- **Ulcer Index:** 8.5865
 
 ## 🎯 Kelly Position Sizing
-- **Win Rate:** 47.37%
-- **Win/Loss Ratio:** 1.9691
-- **Full Kelly:** 20.64%
-- **Fractional Kelly:** 5.16%
+- **Win Rate:** 60.71%
+- **Win/Loss Ratio:** 1.5419
+- **Full Kelly:** 35.24%
+- **Fractional Kelly:** 8.81%
 
 ---
 *Report generated by VBTBacktester*
