@@ -27,3 +27,6 @@ tabulate
 requests-cache
 pytest
 streamlit
+python-dotenv
+vnstock
+fredapi

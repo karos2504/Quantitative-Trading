@@ -24,3 +24,10 @@ Thumbs.db
 
 # Binaries
 chromedriver*
+
+# Environment variables
+.env
+.env.local
+
+# Metadata
+*.parquet

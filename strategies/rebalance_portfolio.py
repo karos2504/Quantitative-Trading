@@ -28,7 +28,7 @@ from plotly.subplots import make_subplots
 from backtesting_engine.backtesting import VBTBacktester
 from config.settings import CASH, COMMISSION
 from portfolio_construction import kpi
-from pit_universe import PointInTimeUniverse
+from strategies.pit_universe import PointInTimeUniverse
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from scipy.optimize import minimize
 from sklearn.covariance import LedoitWolf
@@ -167,7 +167,7 @@ def compute_weights_mvo_constrained(
     historical_returns: pd.DataFrame, 
     universe_sectors: dict,
     prev_weights: dict = None,
-    txn_cost: float = 0.0015  # 15 bps total friction (commission + slippage)
+    txn_cost: float = StrategyConfig.txn_cost
 ) -> dict:
     """
     Mean-Variance Optimization with Ledoit-Wolf Shrinkage, Sector Constraints, 
@@ -278,8 +278,9 @@ def compute_hw_forecasts(prices: pd.DataFrame, window: int = 24) -> dict[str, fl
         try:
             model = ExponentialSmoothing(
                 ts.values[-window:],
-                trend='add',
+                trend='multiplicative',
                 seasonal=None,
+                seasonal_periods=12,
                 initialization_method="estimated"
             ).fit(optimized=True)
             
@@ -437,7 +438,7 @@ def run_strategy(prices: pd.DataFrame, mom_12_1: pd.DataFrame, universe: Univers
     Main strategy loop with institutional-grade MVO and Dynamic Volatility Targeting.
     Replaces heuristic regime overlays with mathematical covariance and vol scaling.
     """
-    returns = prices.pct_change().dropna(how='all')
+    returns = (prices/prices.shift(1)-1).dropna(how='all')
     
     current_weights, prev_weights, weights_history = {}, {}, {}
     order_book_rows = []
@@ -861,7 +862,7 @@ def _load_market_data(config: StrategyConfig, start_date: dt.datetime, end_date:
             logger.info(f"  PiT metadata loaded from {cache_ts.strftime('%Y-%m-%d %H:%M')}")
     else:
         logger.info("  ⚠️  PiT cache not found. Re-scraping Wikipedia...")
-        from pit_universe import PointInTimeUniverse
+        from strategies.pit_universe import PointInTimeUniverse
         pit_engine = PointInTimeUniverse()
         master_tickers = set(pit_engine.current_sp500)
         for t in pit_engine.changes_df['Removed_Ticker']:

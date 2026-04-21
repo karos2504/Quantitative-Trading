@@ -1,188 +1,300 @@
-import streamlit as st
-import os
-import sys
-import subprocess
-from pathlib import Path
-
-st.set_page_config(page_title="Quant Control Center", page_icon="📈", layout="wide")
-
-# Paths
-PROJECT_ROOT = Path(__file__).resolve().parent
-SETTINGS_PATH = PROJECT_ROOT / "config" / "settings.py"
-REPORTS_DIR = PROJECT_ROOT / "strategies" / "reports"
-
-STRATEGIES = {
-    "Renko Hybrid MACD/OBV": "strategies/renko_macd_obv.py",
-    "Renko Hybrid MACD": "strategies/renko_macd.py",
-    "Resistance Breakout": "strategies/resistance_breakout.py",
-    "Markowitz Portfolio Rebalance": "strategies/rebalance_portfolio.py",
-}
-
-def load_settings():
-    if not SETTINGS_PATH.exists(): return {}
-    with open(SETTINGS_PATH, "r") as f:
-        content = f.read()
-    scope = {}
-    exec(content, scope)
-    return scope
-
-def save_settings(tickers_str, cash, commission, data_days, interval, train_m, test_m):
-    tickers_list = [t.strip() for t in tickers_str.split(",") if t.strip()]
-    formatted_tickers = '["' + '", "'.join(tickers_list) + '"]'
-    
-    new_content = f"""TICKERS      = {formatted_tickers}
-CASH         = {cash}
-COMMISSION   = {commission}
-TARGET_RISK  = 500          # $ risk per trade for vol-targeted sizing
-MIN_TRADES   = 10           # fallback threshold
-
-# Walk-forward windows (months)
-WF_TRAIN_MONTHS = {train_m}
-WF_TEST_MONTHS  = {test_m}
-
-# General Engine Settings
-DATA_DAYS  = {data_days}
-INTERVAL   = '{interval}'
 """
-    with open(SETTINGS_PATH, "w") as f:
-        f.write(new_content)
+Macro Rotation Dashboard — Interactive Backtesting UI
+=====================================================
+A premium, interactive Streamlit application to run backtests, 
+analyze regimes, and visualize portfolio performance.
+"""
 
-st.title("📈 Quantitative Research Control Center")
-st.markdown("A unified dashboard for globally configuring, executing, and analyzing walk-forward backtests.")
+import sys
+from pathlib import Path
+import datetime as dt
 
-# --- SIDEBAR: GLOBAL CONFIGURATION ---
-st.sidebar.header("⚙️ Global Configuration")
-current_settings = load_settings()
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
 
-tickers_val = ", ".join(current_settings.get("TICKERS", []))
-cash_val = current_settings.get("CASH", 100000)
-comm_val = current_settings.get("COMMISSION", 0.001)
-data_days_val = current_settings.get("DATA_DAYS", 1095)
-interval_val = current_settings.get("INTERVAL", "1h")
-train_m_val = current_settings.get("WF_TRAIN_MONTHS", 6)
-test_m_val = current_settings.get("WF_TEST_MONTHS", 2)
+# Ensure project root is on path for absolute imports
+ROOT_DIR = Path(__file__).resolve().parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
-with st.sidebar.form("config_form"):
-    st.subheader("Capital & Friction")
-    new_cash = st.number_input("Initial Cash ($)", value=int(cash_val), step=10000)
-    new_comm = st.number_input("Commission (Ratio)", value=float(comm_val), format="%.4f")
-    
-    st.subheader("Data Universe")
-    new_tickers = st.text_area("Tickers (comma separated)", value=tickers_val, height=100)
-    new_data_days = st.number_input("Data Days", value=int(data_days_val), step=365)
-    
-    opts = ["1h", "1d", "1mo"]
-    new_interval = st.selectbox("Interval", opts, index=opts.index(interval_val) if interval_val in opts else 0)
-    
-    st.subheader("Walk-Forward Engine")
-    new_train_m = st.number_input("Train Window (Months)", value=int(train_m_val), step=1)
-    new_test_m = st.number_input("Test Window (Months)", value=int(test_m_val), step=1)
-    
-    saved = st.form_submit_button("Update Pipeline Settings")
-    if saved:
-        save_settings(new_tickers, new_cash, new_comm, new_data_days, new_interval, new_train_m, new_test_m)
-        st.success("Global config synchronized!")
+# Import Macro Rotation Engine
+from macro_rotation.config import SystemConfig, CONFIG, logger, MacroRegime
+from macro_rotation.portfolios import CryptoGoldRotation, CoreAssetMacroRotation
+from macro_rotation.data_loader import load_all_data
+from macro_rotation.backtester import run_backtest, compute_benchmark
+from macro_rotation.dashboard import build_dashboard, save_event_log
 
-# --- MAIN TABS ---
-tab_exec, tab_results = st.tabs(["🚀 Execution Engine", "📊 Integrated Results"])
+# =============================================================================
+# STREAMLIT SETUP
+# =============================================================================
+st.set_page_config(
+    page_title="Macro Rotation Engine",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-with tab_exec:
-    st.header("Launch Backtest")
-    st.markdown("Select a strategy from the generalized architecture to run an exhaustive Walk-Forward optimization.")
-    
-    selected_strategy_name = st.selectbox("Select Strategy Blueprint", list(STRATEGIES.keys()))
-    
-    if st.button("▶️ Launch Algorithm", type="primary"):
-        st.info(f"Running `{STRATEGIES[selected_strategy_name]}` using current global parameters...")
-        
-        script_path = str(PROJECT_ROOT / STRATEGIES[selected_strategy_name])
-        
-        terminal_container = st.empty()
-        log_output = ""
-        
-        with st.spinner("Algorithm is computing... monitoring matrix operations."):
-            try:
-                process = subprocess.Popen(
-                    [sys.executable, script_path],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    universal_newlines=True,
-                    cwd=str(PROJECT_ROOT)
-                )
-                
-                for line in iter(process.stdout.readline, ""):
-                    log_output += line
-                    display_text = "\\n".join(log_output.splitlines()[-50:])
-                    terminal_container.code(display_text, language="bash")
-                
-                process.stdout.close()
-                return_code = process.wait()
-                
-                if return_code == 0:
-                    st.success("Optimization Concluded Successfully!")
-                else:
-                    st.error(f"Execution failed with return code {return_code}.")
-            except Exception as e:
-                st.error(f"Failed to launch process: {e}")
+# Premium Styling
+st.markdown("""
+    <style>
+    .main {
+        background-color: #f8f9fa;
+    }
+    .stMetric {
+        background-color: #ffffff;
+        padding: 15px;
+        border-radius: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+    div[data-testid="stSidebar"] {
+        background-color: #f1f3f6;
+    }
+    .status-box {
+        padding: 20px;
+        border-radius: 10px;
+        margin-bottom: 20px;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-with tab_results:
-    st.header("Strategy Reports")
-    import streamlit.components.v1 as components
-    
-    reports_data = []
-    
-    if REPORTS_DIR.exists():
-        md_files = list(REPORTS_DIR.glob("*_report.md"))
-        for file in md_files:
-            filename = file.name
-            if filename == "comparison_report.md":
-                reports_data.append({"strategy": "Overview", "ticker": "ALL", "path": file, "type": "markdown"})
-                continue
-            
-            base = filename.replace("_report.md", "")
-            parts = base.rsplit("_", 1)
-            if len(parts) == 2:
-                reports_data.append({"strategy": parts[0].replace("_", " ").title(), "ticker": parts[1].upper(), "path": file, "type": "markdown"})
-            else:
-                reports_data.append({"strategy": base.title(), "ticker": "UNKNOWN", "path": file, "type": "markdown"})
+# =============================================================================
+# CACHED DATA LOADING
+# =============================================================================
+@st.cache_data(show_spinner="📥 Fetching market and macro data...")
+def fetch_data(fred_api_key: str, vnindex_csv_path: str, backtest_start: str):
+    """
+    Cached wrapper for load_all_data.
+    Only re-runs if critical config parameters change.
+    """
+    # Create a temporary config for data loading
+    temp_config = SystemConfig(
+        backtest_start=backtest_start,
+        fred_api_key=fred_api_key,
+        vnindex_csv_path=vnindex_csv_path,
+    )
+    data = load_all_data(temp_config)
+    return data
 
-        html_files = list(REPORTS_DIR.glob("*.html"))
-        for file in html_files:
-            if file.name == "portfolio_dashboard.html":
-                reports_data.append({"strategy": "Portfolio Dashboard", "ticker": "ALL", "path": file, "type": "html"})
-
-    if not reports_data:
-        st.info("No reports found yet. Run an algorithm from the Execution Engine to generate reports.")
+@st.cache_data(show_spinner="⚙️ Processing backtest engine...")
+def process_portfolio(
+    portfolio_type: str, 
+    _data: dict, 
+    cash_yield_pct: float,
+    start_str: str,
+    end_str: str
+):
+    """
+    Run the backtest engine for the selected portfolio.
+    _data is prefixed with underscore to exclude it from streamlit's hashing 
+    (we hash the other parameters instead).
+    """
+    # Instantiate portfolio
+    if portfolio_type == "Crypto + Gold Rotation":
+        portfolio = CryptoGoldRotation()
     else:
-        strategies_list = sorted(list(set(d["strategy"] for d in reports_data)))
-        for top_item in ["Portfolio Dashboard", "Overview"]:
-            if top_item in strategies_list:
-                strategies_list.remove(top_item)
-                strategies_list.insert(0, top_item)
+        portfolio = CoreAssetMacroRotation()
+    
+    # Configure run
+    config = SystemConfig(
+        backtest_start=start_str,
+        backtest_end=end_str,
+        cash_yield_apy=cash_yield_pct / 100.0
+    )
+    
+    # Align data to start date and end date
+    prices = _data["prices"][
+        (_data["prices"].index >= pd.Timestamp(start_str)) & 
+        (_data["prices"].index <= pd.Timestamp(end_str))
+    ]
+    
+    # Execute Backtest
+    results = run_backtest(
+        portfolio=portfolio,
+        prices=prices,
+        fred_df=_data["fred"],
+        proxy_prices=_data["proxy_prices"],
+        sector_prices=_data["sector_prices"],
+        config=config
+    )
+    
+    # Benchmark
+    bench_ticker = portfolio.get_benchmark_ticker()
+    benchmark = compute_benchmark(prices, bench_ticker, config)
+    
+    return results, benchmark
 
-        col1, col2 = st.columns(2)
-        with col1:
-            sel_strat = st.selectbox("Select Report Category", strategies_list, key="rep_strat")
+# =============================================================================
+# SIDEBAR — CONFIGURATION
+# =============================================================================
+with st.sidebar:
+    st.header("📊 Engine Control")
+    
+    portfolio_choice = st.selectbox(
+        "Portfolio Strategy",
+        options=["Crypto + Gold Rotation", "Core Asset Macro-Rotation"],
+        help="Select the quantitative strategy to backtest."
+    )
+    
+    st.divider()
+    
+    st.subheader("🛠 Parameters")
+    
+    start_date = st.date_input(
+        "Backtest Start",
+        value=dt.date(2021, 1, 1),
+        min_value=dt.date(2015, 1, 1),
+        max_value=dt.date.today(),
+    )
+
+    end_date = st.date_input(
+        "Backtest End",
+        value=dt.date.today(),
+        min_value=dt.date(2015, 1, 1),
+        max_value=dt.date.today(),
+    )
+    
+    cash_yield_pct = st.slider(
+        "Cash Yield APY (%)",
+        min_value=0.0,
+        max_value=10.0,
+        value=5.25,
+        step=0.25,
+        help="Annual interest rate earned on uninvested cash."
+    )
+    
+    # Safely get default FRED key from secrets if available
+    try:
+        default_fred_key = st.secrets.get("FRED_API_KEY", "")
+    except Exception:
+        default_fred_key = ""
+
+    fred_api_key = st.text_input(
+        "FRED API Key",
+        value=default_fred_key,
+        type="password",
+        help="Optional: Get a free key from fred.stlouisfed.org to enable live macro data."
+    )
+
+    vnindex_csv = st.text_input(
+        "VNINDEX CSV Path",
+        placeholder="e.g., data/vnindex.csv",
+        help="Optional: Path to local CSV for more accurate VNINDEX data."
+    )
+
+    st.divider()
+    
+    run_button = st.button("🚀 Run Backtest", type="primary", use_container_width=True)
+    
+    st.info("System Status: Ready")
+
+# =============================================================================
+# MAIN INTERFACE
+# =============================================================================
+st.title("Macro Rotation Engine")
+st.caption(f"Interactive Quantitative Research Dashboard — {dt.datetime.now().strftime('%Y-%m-%d')}")
+
+# Initial state
+if "backtest_results" not in st.session_state:
+    st.session_state.backtest_results = None
+    st.session_state.benchmark_results = None
+
+if run_button:
+    try:
+        # 1. Load Data
+        data = fetch_data(
+            fred_api_key=fred_api_key,
+            vnindex_csv_path=vnindex_csv,
+            backtest_start=start_date.strftime("%Y-%m-%d")
+        )
         
-        filtered = [d for d in reports_data if d["strategy"] == sel_strat]
-        tickers_list = sorted(list(set(d["ticker"] for d in filtered)))
+        # 2. Run Backtest
+        results, benchmark = process_portfolio(
+            portfolio_type=portfolio_choice,
+            _data=data,
+            cash_yield_pct=cash_yield_pct,
+            start_str=start_date.strftime("%Y-%m-%d"),
+            end_str=end_date.strftime("%Y-%m-%d")
+        )
         
-        with col2:
-            if len(tickers_list) > 1 or (len(tickers_list) == 1 and tickers_list[0] != "ALL"):
-                sel_tick = st.selectbox("Select Ticker Universe", tickers_list, key="rep_tick")
-            else:
-                sel_tick = tickers_list[0]
-                
-        selected_report = next((d for d in filtered if d["ticker"] == sel_tick), None)
-        st.divider()
+        st.session_state.backtest_results = results
+        st.session_state.benchmark_results = benchmark
+        st.success(f"✅ Backtest completed for {portfolio_choice}")
         
-        if selected_report and selected_report["path"].exists():
-            path = selected_report["path"]
-            if selected_report["type"] == "markdown":
-                with open(path, "r", encoding="utf-8") as f:
-                    st.markdown(f.read())
-            elif selected_report["type"] == "html":
-                with open(path, "r", encoding="utf-8") as f:
-                    components.html(f.read(), height=1000, scrolling=True)
-            else:
-                st.error("Unknown report type.")
+    except Exception as e:
+        st.error(f"❌ Error during backtest: {str(e)}")
+        st.exception(e)
+
+# =============================================================================
+# RESULTS DISPLAY
+# =============================================================================
+if st.session_state.backtest_results:
+    results = st.session_state.backtest_results
+    benchmark = st.session_state.benchmark_results
+    metrics = results["metrics"]
+    
+    # --- Top KPIs ---
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("CAGR (%)", f"{metrics['CAGR (%)']}%", delta=f"{(metrics['CAGR (%)'] - benchmark['metrics']['CAGR (%)']):.1f}% vs Bench")
+    with c2:
+        st.metric("Sharpe Ratio", f"{metrics['Sharpe']}")
+    with c3:
+        st.metric("Max Drawdown", f"{metrics['Max Drawdown (%)']}%", delta=f"{(metrics['Max Drawdown (%)'] - benchmark['metrics']['Max Drawdown (%)']):.1f}%", delta_color="inverse")
+    with c4:
+        st.metric("Final Value", f"${metrics['Final Value ($)']:,.0f}")
+
+    # --- MAIN DASHBOARD ---
+    with st.spinner("Rendering visualization..."):
+        fig = build_dashboard(results, benchmark)
+        # Update layout for Streamlit container width
+        fig.update_layout(height=1600, width=None)
+        st.plotly_chart(fig, use_container_width=True, theme="streamlit")
+
+    # --- EXPERT LOGS ---
+    with st.expander("📝 View Detailed Event Log (Audit Trail)"):
+        events = results["events"]
+        records = []
+        for e in events:
+            records.append({
+                "Date": e.date.date(),
+                "Reason": e.reason,
+                "Regime": e.regime.value,
+                "BTC Risk": f"{e.btc_risk:.2f}",
+                "Sentiment": e.sentiment,
+                "Live Signal": e.live_signal,
+                "Turnover": f"{e.turnover*100:.1f}%",
+                "Fees": f"${e.total_fees_usd:.0f}",
+                "Portfolio Val": f"${e.portfolio_value:,.0f}"
+            })
+        event_df = pd.DataFrame(records)
+        st.dataframe(event_df, use_container_width=True)
+
+else:
+    # No results yet — show splash
+    st.container()
+    st.markdown("""
+        ### Welcome to the Macro Rotation Dashboard
+        
+        Click **Run Backtest** in the sidebar to start a simulation. 
+        
+        This engine models a multi-asset portfolio with:
+        * **Trend-Following Signals**: Based on Momentum-Persistence filters.
+        * **Macro Overlay**: Dynamic allocation based on Growth vs. Inflation regimes.
+        * **Risk Management**: BTC volatility metrics and sentiment-aware sizing.
+        * **Realistic Execution**: Marginal trading costs, APY on idle cash, and settlement lags.
+    """)
+    
+    # Show pre-generated reports if available
+    reports_dir = Path("macro_rotation/reports")
+    if reports_dir.exists():
+        html_files = list(reports_dir.glob("*_dashboard.html"))
+        if html_files:
+            st.divider()
+            st.subheader("📂 Pre-generated Reports")
+            for f in html_files:
+                if st.button(f"View {f.name}"):
+                    import streamlit.components.v1 as components
+                    components.html(f.read_text(encoding="utf-8"), height=1700, scrolling=True)
+
